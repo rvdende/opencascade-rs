@@ -274,7 +274,52 @@ impl TorusBuilder {
     }
 }
 
+/// Global mass properties of a shape, as computed by OCCT's `BRepGProp`.
+///
+/// The values assume unit density, so `volume` doubles as the mass and
+/// `center_of_mass` is the centroid of the volume.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MassProperties {
+    pub volume: f64,
+    pub surface_area: f64,
+    pub center_of_mass: DVec3,
+}
+
 impl Shape {
+    /// Volume, surface area and volume centroid of the shape.
+    ///
+    /// Computed from the exact geometry, not from a triangulation.
+    pub fn mass_properties(&self) -> MassProperties {
+        let only_closed = false;
+        let skip_shared = false;
+        let use_triangulation = false;
+
+        let mut volume_props = ffi::g_prop::GProps_new();
+        ffi::b_rep_g_prop::BRepGProp::VolumeProperties(
+            &self.inner,
+            volume_props.pin_mut(),
+            only_closed,
+            skip_shared,
+            use_triangulation,
+        );
+
+        let mut surface_props = ffi::g_prop::GProps_new();
+        ffi::b_rep_g_prop::BRepGProp::SurfaceProperties(
+            &self.inner,
+            surface_props.pin_mut(),
+            skip_shared,
+            use_triangulation,
+        );
+
+        let center = ffi::g_prop::GProp_GProps_CentreOfMass(&volume_props);
+
+        MassProperties {
+            volume: volume_props.Mass(),
+            surface_area: surface_props.Mass(),
+            center_of_mass: dvec3(center.X(), center.Y(), center.Z()),
+        }
+    }
+
     #[must_use]
     pub fn as_wire(&self) -> Option<Wire> {
         if self.shape_type() == ShapeType::Wire {
