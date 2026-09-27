@@ -5,6 +5,7 @@ pub mod bounding_box;
 pub mod kicad;
 pub mod mesh;
 pub mod primitives;
+pub mod safe;
 pub mod section;
 pub mod workplane;
 
@@ -39,4 +40,6 @@ pub enum Error {
     UntriangulatedFace,
     #[error("at least 2 points are required for creating a wire")]
     NotEnoughPoints,
+    #[error("OpenCASCADE: {0}")]
+    Occt(String),
 }

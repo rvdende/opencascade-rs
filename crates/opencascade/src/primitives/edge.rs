@@ -95,8 +95,6 @@ impl Edge {
         Self::from_make_edge(make_edge)
     }
 
-    pub fn ellipse() {}
-
     pub fn spline_from_points(
         points: impl IntoIterator<Item = DVec3>,
         tangents: Option<(DVec3, DVec3)>,

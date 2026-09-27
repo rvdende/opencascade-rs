@@ -14,6 +14,7 @@ pub mod b_rep_prim_api;
 pub mod b_rep_tools;
 pub mod bin_tools;
 pub mod bnd;
+pub mod cadrs_safe;
 pub mod bop_algo;
 pub mod g_prop;
 pub mod gc;
