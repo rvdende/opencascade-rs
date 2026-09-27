@@ -61,7 +61,14 @@ template <typename Try, typename Fail> static void trycatch(Try &&func, Fail &&f
 #include <Poly_PolygonOnTriangulation.hxx>
 #include <Poly_Triangulation.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
+#include <BRepBuilderAPI_MakeShape.hxx>
+#include <GCPnts_AbscissaPoint.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopoDS_Vertex.hxx>
+#include <algorithm>
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
@@ -321,6 +328,320 @@ inline std::unique_ptr<TopoDS_Shape> cadrs_thick_solid(const TopoDS_Shape &shape
     throw std::runtime_error("shell failed");
   }
   return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(make.Shape()));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Modeling history (persistent naming, cadrs P3.2)
+//
+// The `*_h` operations also write what the operation did to its inputs into `hist`, as indices
+// into the result's faces (`TopExp::MapShapes(result, TopAbs_FACE)` order, 0-based). `hist` has
+// five sections, each a count `n` followed by `n` entries; each entry is a count `k` followed by
+// `k` face indices:
+//   1. faces:    every face of the inputs (in input order, MapShapes order within an input):
+//                the result faces it became (`Modified`, or itself if kept; k = 0: deleted);
+//   2. edges:    every edge of the inputs: the result faces generated from it (`Generated`);
+//   3. vertices: every vertex of the inputs: the result faces generated from it;
+//   4. first:    one entry, the faces of `FirstShape()` (a sweep's start cap; k = 0 otherwise);
+//   5. last:     one entry, the faces of `LastShape()`.
+
+/// One entry: the distinct result faces of `list` that are faces.
+inline void cadrs_hist_entry(const TopTools_ListOfShape &list, const TopTools_IndexedMapOfShape &result,
+                             std::vector<int32_t> &out) {
+  std::vector<int32_t> idx;
+  for (TopTools_ListOfShape::Iterator it(list); it.More(); it.Next()) {
+    if (it.Value().ShapeType() != TopAbs_FACE) {
+      continue;
+    }
+    const int32_t k = (int32_t)result.FindIndex(it.Value()) - 1;
+    if (k >= 0 && std::find(idx.begin(), idx.end(), k) == idx.end()) {
+      idx.push_back(k);
+    }
+  }
+  out.push_back((int32_t)idx.size());
+  out.insert(out.end(), idx.begin(), idx.end());
+}
+
+/// One entry: the result faces among the faces of `shape`.
+inline void cadrs_hist_faces_of(const TopoDS_Shape *shape, const TopTools_IndexedMapOfShape &result,
+                                std::vector<int32_t> &out) {
+  TopTools_ListOfShape list;
+  if (shape != nullptr && !shape->IsNull()) {
+    for (TopExp_Explorer ex(*shape, TopAbs_FACE); ex.More(); ex.Next()) {
+      list.Append(ex.Current());
+    }
+  }
+  cadrs_hist_entry(list, result, out);
+}
+
+/// Writes the history of `make` for `inputs` into `out` (see above).
+template <typename Make>
+inline void cadrs_history(Make &make, const std::vector<const TopoDS_Shape *> &inputs, const TopoDS_Shape &result,
+                          const TopoDS_Shape *first, const TopoDS_Shape *last, std::vector<int32_t> &out) {
+  TopTools_IndexedMapOfShape res;
+  TopExp::MapShapes(result, TopAbs_FACE, res);
+  const TopAbs_ShapeEnum kinds[3] = {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX};
+  for (int kind = 0; kind < 3; ++kind) {
+    std::vector<TopoDS_Shape> subs;
+    for (const TopoDS_Shape *input : inputs) {
+      TopTools_IndexedMapOfShape map;
+      TopExp::MapShapes(*input, kinds[kind], map);
+      for (Standard_Integer i = 1; i <= map.Extent(); ++i) {
+        subs.push_back(map(i));
+      }
+    }
+    out.push_back((int32_t)subs.size());
+    for (const TopoDS_Shape &sub : subs) {
+      if (kind != 0) {
+        cadrs_hist_entry(make.Generated(sub), res, out);
+      } else if (make.IsDeleted(sub)) {
+        out.push_back(0);
+      } else if (make.Modified(sub).IsEmpty()) {
+        // Kept as it is (or gone without being reported deleted).
+        TopTools_ListOfShape self;
+        self.Append(sub);
+        cadrs_hist_entry(self, res, out);
+      } else {
+        cadrs_hist_entry(make.Modified(sub), res, out);
+      }
+    }
+  }
+  out.push_back(1);
+  cadrs_hist_faces_of(first, res, out);
+  out.push_back(1);
+  cadrs_hist_faces_of(last, res, out);
+}
+
+inline std::unique_ptr<TopoDS_Shape> cadrs_prism_h(const TopoDS_Shape &shape, double dx, double dy, double dz,
+                                                  std::vector<int32_t> &hist) {
+  BRepPrimAPI_MakePrism make(shape, gp_Vec(dx, dy, dz));
+  if (!make.IsDone()) {
+    throw std::runtime_error("extrusion failed");
+  }
+  const TopoDS_Shape result = make.Shape();
+  const TopoDS_Shape first = make.FirstShape();
+  const TopoDS_Shape last = make.LastShape();
+  cadrs_history(make, {&shape}, result, &first, &last, hist);
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
+}
+
+inline std::unique_ptr<TopoDS_Shape> cadrs_revol_h(const TopoDS_Shape &shape, double ox, double oy, double oz,
+                                                  double dx, double dy, double dz, double angle,
+                                                  std::vector<int32_t> &hist) {
+  BRepPrimAPI_MakeRevol make(shape, gp_Ax1(gp_Pnt(ox, oy, oz), gp_Dir(dx, dy, dz)), angle);
+  if (!make.IsDone()) {
+    throw std::runtime_error("revolve failed");
+  }
+  const TopoDS_Shape result = make.Shape();
+  const TopoDS_Shape first = make.FirstShape();
+  const TopoDS_Shape last = make.LastShape();
+  cadrs_history(make, {&shape}, result, &first, &last, hist);
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
+}
+
+/// [`cadrs_boolean`] with history (inputs: `a`, then `b`).
+inline std::unique_ptr<TopoDS_Shape> cadrs_boolean_h(const TopoDS_Shape &a, const TopoDS_Shape &b, int32_t op,
+                                                    std::vector<int32_t> &hist) {
+  std::unique_ptr<BRepAlgoAPI_BooleanOperation> algo;
+  switch (op) {
+  case 0:
+    algo.reset(new BRepAlgoAPI_Fuse(a, b));
+    break;
+  case 1:
+    algo.reset(new BRepAlgoAPI_Cut(a, b));
+    break;
+  case 2:
+    algo.reset(new BRepAlgoAPI_Common(a, b));
+    break;
+  default:
+    throw std::runtime_error("unknown boolean operation");
+  }
+  if (!algo->IsDone() || algo->HasErrors()) {
+    throw std::runtime_error("boolean operation failed");
+  }
+  const TopoDS_Shape result = algo->Shape();
+  cadrs_history(*algo, {&a, &b}, result, nullptr, nullptr, hist);
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
+}
+
+/// [`cadrs_fillet`] with history.
+inline std::unique_ptr<TopoDS_Shape> cadrs_fillet_h(const TopoDS_Shape &shape, const TopTools_ListOfShape &edges,
+                                                   double radius, std::vector<int32_t> &hist) {
+  BRepFilletAPI_MakeFillet make(shape);
+  for (TopTools_ListOfShape::Iterator it(edges); it.More(); it.Next()) {
+    make.Add(radius, TopoDS::Edge(it.Value()));
+  }
+  make.Build();
+  if (!make.IsDone()) {
+    throw std::runtime_error("fillet failed");
+  }
+  const TopoDS_Shape result = make.Shape();
+  cadrs_history(make, {&shape}, result, nullptr, nullptr, hist);
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
+}
+
+/// [`cadrs_chamfer`] with history.
+inline std::unique_ptr<TopoDS_Shape> cadrs_chamfer_h(const TopoDS_Shape &shape, const TopTools_ListOfShape &edges,
+                                                    const TopTools_ListOfShape &faces, int32_t mode, double d1,
+                                                    double d2, std::vector<int32_t> &hist) {
+  BRepFilletAPI_MakeChamfer make(shape);
+  TopTools_ListOfShape::Iterator f(faces);
+  for (TopTools_ListOfShape::Iterator it(edges); it.More(); it.Next()) {
+    const TopoDS_Edge &edge = TopoDS::Edge(it.Value());
+    if (mode == 0) {
+      make.Add(d1, edge);
+      continue;
+    }
+    if (!f.More()) {
+      throw std::runtime_error("chamfer: a face is needed for each edge");
+    }
+    const TopoDS_Face &face = TopoDS::Face(f.Value());
+    f.Next();
+    if (mode == 1) {
+      make.Add(d1, d2, edge, face);
+    } else {
+      make.AddDA(d1, d2, edge, face);
+    }
+  }
+  make.Build();
+  if (!make.IsDone()) {
+    throw std::runtime_error("chamfer failed");
+  }
+  const TopoDS_Shape result = make.Shape();
+  cadrs_history(make, {&shape}, result, nullptr, nullptr, hist);
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
+}
+
+/// [`cadrs_thick_solid`] with history.
+inline std::unique_ptr<TopoDS_Shape> cadrs_thick_solid_h(const TopoDS_Shape &shape, const TopTools_ListOfShape &faces,
+                                                        double offset, double tolerance, std::vector<int32_t> &hist) {
+  BRepOffsetAPI_MakeThickSolid make;
+  make.MakeThickSolidByJoin(shape, faces, offset, tolerance);
+  if (!make.IsDone()) {
+    throw std::runtime_error("shell failed");
+  }
+  const TopoDS_Shape result = make.Shape();
+  cadrs_history(make, {&shape}, result, nullptr, nullptr, hist);
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Topology queries (indices in `TopExp::MapShapes` order, 0-based)
+
+/// The number of distinct faces, edges and vertices of `shape` (the index ranges used above).
+inline void cadrs_counts(const TopoDS_Shape &shape, std::vector<int32_t> &out) {
+  const TopAbs_ShapeEnum kinds[3] = {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX};
+  for (TopAbs_ShapeEnum kind : kinds) {
+    TopTools_IndexedMapOfShape map;
+    TopExp::MapShapes(shape, kind, map);
+    out.push_back((int32_t)map.Extent());
+  }
+}
+
+/// Per edge of `shape`, 17 numbers: its start, end and middle points (xyz each), the unit
+/// tangents at its start and end (in the direction the edge runs), its exact length, and its curve
+/// type (`GeomAbs_CurveType`: 0 line, 1 circle, 2 ellipse, ...; -1 for a degenerate edge, such
+/// as a cone's apex, which has zero length and zero tangents).
+inline void cadrs_edges_info(const TopoDS_Shape &shape, std::vector<double> &out) {
+  TopTools_IndexedMapOfShape edges;
+  TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+  for (Standard_Integer i = 1; i <= edges.Extent(); ++i) {
+    const TopoDS_Edge &edge = TopoDS::Edge(edges(i));
+    double v[17] = {0};
+    if (BRep_Tool::Degenerated(edge)) {
+      const gp_Pnt p = BRep_Tool::Pnt(TopExp::FirstVertex(edge));
+      for (int k = 0; k < 3; ++k) {
+        v[3 * k] = p.X();
+        v[3 * k + 1] = p.Y();
+        v[3 * k + 2] = p.Z();
+      }
+      v[16] = -1.0;
+      out.insert(out.end(), v, v + 17);
+      continue;
+    }
+    BRepAdaptor_Curve c(edge);
+    const double t0 = c.FirstParameter(), t1 = c.LastParameter();
+    gp_Pnt p0, p1, pm;
+    gp_Vec d0, d1, dm;
+    c.D1(t0, p0, d0);
+    c.D1(t1, p1, d1);
+    c.D1((t0 + t1) / 2.0, pm, dm);
+    if (edge.Orientation() == TopAbs_REVERSED) {
+      std::swap(p0, p1);
+      std::swap(d0, d1);
+      d0.Reverse();
+      d1.Reverse();
+    }
+    if (d0.Magnitude() > 1e-300) {
+      d0.Normalize();
+    }
+    if (d1.Magnitude() > 1e-300) {
+      d1.Normalize();
+    }
+    const gp_Pnt ps[3] = {p0, p1, pm};
+    for (int k = 0; k < 3; ++k) {
+      v[3 * k] = ps[k].X();
+      v[3 * k + 1] = ps[k].Y();
+      v[3 * k + 2] = ps[k].Z();
+    }
+    v[9] = d0.X();
+    v[10] = d0.Y();
+    v[11] = d0.Z();
+    v[12] = d1.X();
+    v[13] = d1.Y();
+    v[14] = d1.Z();
+    v[15] = GCPnts_AbscissaPoint::Length(c);
+    v[16] = (double)c.GetType();
+    out.insert(out.end(), v, v + 17);
+  }
+}
+
+/// Per edge of `shape`: a count and the indices of the faces around it (a seam edge lists its
+/// face once).
+inline void cadrs_edge_faces(const TopoDS_Shape &shape, std::vector<int32_t> &out) {
+  TopTools_IndexedMapOfShape faces;
+  TopExp::MapShapes(shape, TopAbs_FACE, faces);
+  TopTools_IndexedMapOfShape edges;
+  TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+  TopTools_IndexedDataMapOfShapeListOfShape around;
+  TopExp::MapShapesAndUniqueAncestors(shape, TopAbs_EDGE, TopAbs_FACE, around);
+  for (Standard_Integer i = 1; i <= edges.Extent(); ++i) {
+    TopTools_ListOfShape list;
+    const Standard_Integer j = around.FindIndex(edges(i));
+    if (j > 0) {
+      list = around(j);
+    }
+    cadrs_hist_entry(list, faces, out);
+  }
+}
+
+/// Per vertex of `shape`: its point (xyz, into `points`), and a count and the indices of the
+/// (non-degenerate) edges that end at it (into `edges_out`).
+inline void cadrs_vertices(const TopoDS_Shape &shape, std::vector<double> &points, std::vector<int32_t> &edges_out) {
+  TopTools_IndexedMapOfShape vertices;
+  TopExp::MapShapes(shape, TopAbs_VERTEX, vertices);
+  TopTools_IndexedMapOfShape edges;
+  TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+  TopTools_IndexedDataMapOfShapeListOfShape around;
+  TopExp::MapShapesAndUniqueAncestors(shape, TopAbs_VERTEX, TopAbs_EDGE, around);
+  for (Standard_Integer i = 1; i <= vertices.Extent(); ++i) {
+    const gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(vertices(i)));
+    points.push_back(p.X());
+    points.push_back(p.Y());
+    points.push_back(p.Z());
+    std::vector<int32_t> idx;
+    const Standard_Integer j = around.FindIndex(vertices(i));
+    if (j > 0) {
+      for (TopTools_ListOfShape::Iterator it(around(j)); it.More(); it.Next()) {
+        const int32_t k = (int32_t)edges.FindIndex(it.Value()) - 1;
+        if (k >= 0 && !BRep_Tool::Degenerated(TopoDS::Edge(it.Value())) &&
+            std::find(idx.begin(), idx.end(), k) == idx.end()) {
+          idx.push_back(k);
+        }
+      }
+    }
+    edges_out.push_back((int32_t)idx.size());
+    edges_out.insert(edges_out.end(), idx.begin(), idx.end());
+  }
 }
 
 // ---------------------------------------------------------------------------------------------

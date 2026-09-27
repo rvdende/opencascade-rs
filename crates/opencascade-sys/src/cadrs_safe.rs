@@ -154,5 +154,65 @@ mod inner {
 
         pub fn cadrs_new_f64_vec() -> UniquePtr<CxxVector<f64>>;
         pub fn cadrs_new_i32_vec() -> UniquePtr<CxxVector<i32>>;
+
+        // Modeling history (see `cadrs_history` in the header for the layout of `hist`).
+        pub fn cadrs_prism_h(
+            shape: &TopoDS_Shape,
+            dx: f64,
+            dy: f64,
+            dz: f64,
+            hist: Pin<&mut CxxVector<i32>>,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
+        #[allow(clippy::too_many_arguments)]
+        pub fn cadrs_revol_h(
+            shape: &TopoDS_Shape,
+            ox: f64,
+            oy: f64,
+            oz: f64,
+            dx: f64,
+            dy: f64,
+            dz: f64,
+            angle: f64,
+            hist: Pin<&mut CxxVector<i32>>,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
+        pub fn cadrs_boolean_h(
+            a: &TopoDS_Shape,
+            b: &TopoDS_Shape,
+            op: i32,
+            hist: Pin<&mut CxxVector<i32>>,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
+        pub fn cadrs_fillet_h(
+            shape: &TopoDS_Shape,
+            edges: &TopTools_ListOfShape,
+            radius: f64,
+            hist: Pin<&mut CxxVector<i32>>,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
+        #[allow(clippy::too_many_arguments)]
+        pub fn cadrs_chamfer_h(
+            shape: &TopoDS_Shape,
+            edges: &TopTools_ListOfShape,
+            faces: &TopTools_ListOfShape,
+            mode: i32,
+            d1: f64,
+            d2: f64,
+            hist: Pin<&mut CxxVector<i32>>,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
+        pub fn cadrs_thick_solid_h(
+            shape: &TopoDS_Shape,
+            faces: &TopTools_ListOfShape,
+            offset: f64,
+            tolerance: f64,
+            hist: Pin<&mut CxxVector<i32>>,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
+
+        // Topology queries (MapShapes order)
+        pub fn cadrs_counts(shape: &TopoDS_Shape, out: Pin<&mut CxxVector<i32>>) -> Result<()>;
+        pub fn cadrs_edges_info(shape: &TopoDS_Shape, out: Pin<&mut CxxVector<f64>>) -> Result<()>;
+        pub fn cadrs_edge_faces(shape: &TopoDS_Shape, out: Pin<&mut CxxVector<i32>>) -> Result<()>;
+        pub fn cadrs_vertices(
+            shape: &TopoDS_Shape,
+            points: Pin<&mut CxxVector<f64>>,
+            edges: Pin<&mut CxxVector<i32>>,
+        ) -> Result<()>;
     }
 }

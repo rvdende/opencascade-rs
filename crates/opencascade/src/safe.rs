@@ -282,3 +282,239 @@ impl Shape {
         ffi::cadrs_safe::cadrs_shape_hash(&self.inner)
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Modeling history and topology queries (cadrs P3.2, persistent naming)
+//
+// Faces, edges and vertices are numbered as `TopExp::MapShapes` numbers them: in explorer order,
+// each sub-shape once (its first occurrence), from 0.
+
+/// What a modeling operation did to its inputs. Every list holds indices of faces of the result.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct History {
+    /// Per face of the inputs (the inputs' faces one after another): the faces it became. Empty
+    /// if it was deleted; the face itself if it was kept unchanged.
+    pub faces: Vec<Vec<usize>>,
+    /// Per edge of the inputs: the faces generated from it (a prism's side face, a fillet).
+    pub edges: Vec<Vec<usize>>,
+    /// Per vertex of the inputs: the faces generated from it (a fillet's corner patch).
+    pub vertices: Vec<Vec<usize>>,
+    /// The faces of a sweep's start (`FirstShape`), for prisms and revolutions.
+    pub first: Vec<usize>,
+    /// The faces of a sweep's end (`LastShape`).
+    pub last: Vec<usize>,
+}
+
+fn parse_history(v: &[i32]) -> Result<History, Error> {
+    let bad = || Error::Occt("malformed history".into());
+    let next = |i: &mut usize| -> Result<usize, Error> {
+        let x = *v.get(*i).ok_or_else(bad)?;
+        *i += 1;
+        usize::try_from(x).map_err(|_| bad())
+    };
+    let section = |i: &mut usize| -> Result<Vec<Vec<usize>>, Error> {
+        let n = next(i)?;
+        (0..n)
+            .map(|_| {
+                let k = next(i)?;
+                (0..k).map(|_| next(i)).collect()
+            })
+            .collect()
+    };
+    let mut i = 0usize;
+    let faces = section(&mut i)?;
+    let edges = section(&mut i)?;
+    let vertices = section(&mut i)?;
+    let first = section(&mut i)?.into_iter().next().unwrap_or_default();
+    let last = section(&mut i)?.into_iter().next().unwrap_or_default();
+    Ok(History { faces, edges, vertices, first, last })
+}
+
+fn with_history(
+    f: impl FnOnce(
+        std::pin::Pin<&mut cxx::CxxVector<i32>>,
+    ) -> Result<UniquePtr<ffi::topo_ds::TopoDS_Shape>, cxx::Exception>,
+) -> Result<(Shape, History), Error> {
+    let mut hist = ffi::cadrs_safe::cadrs_new_i32_vec();
+    let inner = f(hist.pin_mut()).map_err(occt)?;
+    let history = parse_history(hist.as_slice())?;
+    Ok((shape(inner)?, history))
+}
+
+/// The type of curve an edge lies on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurveType {
+    Line,
+    Circle,
+    Ellipse,
+    /// A degenerate edge (a cone's apex, a sphere's pole).
+    Degenerate,
+    Other,
+}
+
+/// The exact geometry of an edge.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EdgeGeometry {
+    pub start: DVec3,
+    pub end: DVec3,
+    /// The point halfway along its parameter range.
+    pub mid: DVec3,
+    /// Unit tangents, in the direction the edge runs.
+    pub start_tangent: DVec3,
+    pub end_tangent: DVec3,
+    /// Exact length (`GCPnts_AbscissaPoint`).
+    pub length: f64,
+    pub curve: CurveType,
+}
+
+fn topo_counts(s: &ffi::topo_ds::TopoDS_Shape) -> Result<[usize; 3], Error> {
+    let mut v = ffi::cadrs_safe::cadrs_new_i32_vec();
+    ffi::cadrs_safe::cadrs_counts(s, v.pin_mut()).map_err(occt)?;
+    let s = v.as_slice();
+    Ok([s[0] as usize, s[1] as usize, s[2] as usize])
+}
+
+fn edges_geometry(s: &ffi::topo_ds::TopoDS_Shape) -> Result<Vec<EdgeGeometry>, Error> {
+    let mut v = ffi::cadrs_safe::cadrs_new_f64_vec();
+    ffi::cadrs_safe::cadrs_edges_info(s, v.pin_mut()).map_err(occt)?;
+    Ok(v.as_slice()
+        .chunks_exact(17)
+        .map(|c| {
+            let p = |i: usize| dvec3(c[i], c[i + 1], c[i + 2]);
+            EdgeGeometry {
+                start: p(0),
+                end: p(3),
+                mid: p(6),
+                start_tangent: p(9),
+                end_tangent: p(12),
+                length: c[15],
+                curve: match c[16] as i32 {
+                    -1 => CurveType::Degenerate,
+                    0 => CurveType::Line,
+                    1 => CurveType::Circle,
+                    2 => CurveType::Ellipse,
+                    _ => CurveType::Other,
+                },
+            }
+        })
+        .collect())
+}
+
+/// Entries of a count followed by that many indices.
+fn entries(v: &[i32]) -> Vec<Vec<usize>> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < v.len() {
+        let k = v[i].max(0) as usize;
+        let end = (i + 1 + k).min(v.len());
+        out.push(v[i + 1..end].iter().map(|x| *x as usize).collect());
+        i = end;
+    }
+    out
+}
+
+impl Face {
+    /// [`Face::try_extrude`], with what the prism made from each part of the face.
+    pub fn try_extrude_h(&self, dir: DVec3) -> Result<(Shape, History), Error> {
+        let s = ffi::topo_ds::cast_face_to_shape(&self.inner);
+        with_history(|h| ffi::cadrs_safe::cadrs_prism_h(s, dir.x, dir.y, dir.z, h))
+    }
+
+    /// [`Face::try_revolve`], with history.
+    pub fn try_revolve_h(&self, origin: DVec3, axis: DVec3, angle: f64) -> Result<(Shape, History), Error> {
+        let s = ffi::topo_ds::cast_face_to_shape(&self.inner);
+        let (o, d) = (origin, axis);
+        with_history(|h| ffi::cadrs_safe::cadrs_revol_h(s, o.x, o.y, o.z, d.x, d.y, d.z, angle, h))
+    }
+
+    /// The face's edges (MapShapes order), with their exact geometry.
+    pub fn edges_geometry(&self) -> Result<Vec<EdgeGeometry>, Error> {
+        edges_geometry(ffi::topo_ds::cast_face_to_shape(&self.inner))
+    }
+
+    /// The number of distinct faces (1), edges and vertices of the face.
+    pub fn topology_counts(&self) -> Result<[usize; 3], Error> {
+        topo_counts(ffi::topo_ds::cast_face_to_shape(&self.inner))
+    }
+}
+
+impl Shape {
+    fn try_boolean_h(&self, other: &Shape, op: i32) -> Result<(Shape, History), Error> {
+        with_history(|h| ffi::cadrs_safe::cadrs_boolean_h(&self.inner, &other.inner, op, h))
+    }
+
+    /// [`Shape::try_union`] with history (this shape's faces first, then `other`'s).
+    pub fn try_union_h(&self, other: &Shape) -> Result<(Shape, History), Error> {
+        self.try_boolean_h(other, 0)
+    }
+
+    pub fn try_subtract_h(&self, other: &Shape) -> Result<(Shape, History), Error> {
+        self.try_boolean_h(other, 1)
+    }
+
+    pub fn try_intersect_h(&self, other: &Shape) -> Result<(Shape, History), Error> {
+        self.try_boolean_h(other, 2)
+    }
+
+    pub fn try_fillet_edges_h<'a>(
+        &self,
+        radius: f64,
+        edges: impl IntoIterator<Item = &'a Edge>,
+    ) -> Result<(Shape, History), Error> {
+        let list = shape_list(edges.into_iter().map(|e| ffi::topo_ds::cast_edge_to_shape(&e.inner)));
+        with_history(|h| ffi::cadrs_safe::cadrs_fillet_h(&self.inner, &list, radius, h))
+    }
+
+    pub fn try_chamfer_edges_h<'a>(
+        &self,
+        kind: ChamferKind,
+        edges: impl IntoIterator<Item = (&'a Edge, &'a Face)>,
+    ) -> Result<(Shape, History), Error> {
+        let pairs: Vec<(&Edge, &Face)> = edges.into_iter().collect();
+        let edge_list = shape_list(pairs.iter().map(|(e, _)| ffi::topo_ds::cast_edge_to_shape(&e.inner)));
+        let face_list = shape_list(pairs.iter().map(|(_, f)| ffi::topo_ds::cast_face_to_shape(&f.inner)));
+        let (mode, d1, d2) = match kind {
+            ChamferKind::Equal(d) => (0, d, d),
+            ChamferKind::TwoDistances(a, b) => (1, a, b),
+            ChamferKind::DistanceAngle(d, a) => (2, d, a),
+        };
+        with_history(|h| {
+            ffi::cadrs_safe::cadrs_chamfer_h(&self.inner, &edge_list, &face_list, mode, d1, d2, h)
+        })
+    }
+
+    pub fn try_hollow_h<'a>(
+        &self,
+        offset: f64,
+        faces: impl IntoIterator<Item = &'a Face>,
+    ) -> Result<(Shape, History), Error> {
+        let list = shape_list(faces.into_iter().map(|f| ffi::topo_ds::cast_face_to_shape(&f.inner)));
+        with_history(|h| ffi::cadrs_safe::cadrs_thick_solid_h(&self.inner, &list, offset, 1e-4, h))
+    }
+
+    /// The number of distinct faces, edges and vertices.
+    pub fn topology_counts(&self) -> Result<[usize; 3], Error> {
+        topo_counts(&self.inner)
+    }
+
+    /// Every edge (MapShapes order) with its exact geometry.
+    pub fn edges_geometry(&self) -> Result<Vec<EdgeGeometry>, Error> {
+        edges_geometry(&self.inner)
+    }
+
+    /// Per edge (MapShapes order): the faces around it (MapShapes order).
+    pub fn edge_faces(&self) -> Result<Vec<Vec<usize>>, Error> {
+        let mut v = ffi::cadrs_safe::cadrs_new_i32_vec();
+        ffi::cadrs_safe::cadrs_edge_faces(&self.inner, v.pin_mut()).map_err(occt)?;
+        Ok(entries(v.as_slice()))
+    }
+
+    /// Per vertex (MapShapes order): its point and the edges that end at it.
+    pub fn vertices_info(&self) -> Result<Vec<(DVec3, Vec<usize>)>, Error> {
+        let mut pts = ffi::cadrs_safe::cadrs_new_f64_vec();
+        let mut edges = ffi::cadrs_safe::cadrs_new_i32_vec();
+        ffi::cadrs_safe::cadrs_vertices(&self.inner, pts.pin_mut(), edges.pin_mut()).map_err(occt)?;
+        let points = triples(&pts);
+        Ok(points.into_iter().zip(entries(edges.as_slice())).collect())
+    }
+}
