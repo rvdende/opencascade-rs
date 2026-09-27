@@ -940,3 +940,87 @@ inline void cadrs_bbox(const TopoDS_Shape &shape, std::vector<double> &out) {
   const double v[6] = {x0, y0, z0, x1, y1, z1};
   out.insert(out.end(), v, v + 6);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Axes of curved faces and circular edges (cadrs P3.4, revolve axes)
+
+#include <gp_Cylinder.hxx>
+#include <gp_Cone.hxx>
+#include <gp_Sphere.hxx>
+#include <gp_Torus.hxx>
+
+/// Per face (MapShapes order), 8 values: a flag (1 when the face has an axis: a cylinder, cone,
+/// sphere, torus or surface of revolution; else 0), the axis's origin xyz and unit direction
+/// xyz, and the radius (the cylinder's, the cone's reference radius, the torus's major radius,
+/// the sphere's; 0 for a surface of revolution).
+inline void cadrs_face_axes(const TopoDS_Shape &shape, std::vector<double> &out) {
+  TopTools_IndexedMapOfShape faces;
+  TopExp::MapShapes(shape, TopAbs_FACE, faces);
+  for (Standard_Integer i = 1; i <= faces.Extent(); ++i) {
+    double v[8] = {0};
+    try {
+      BRepAdaptor_Surface s(TopoDS::Face(faces(i)));
+      gp_Ax1 ax;
+      bool has = true;
+      double r = 0.0;
+      switch (s.GetType()) {
+      case GeomAbs_Cylinder:
+        ax = s.Cylinder().Axis();
+        r = s.Cylinder().Radius();
+        break;
+      case GeomAbs_Cone:
+        ax = s.Cone().Axis();
+        r = s.Cone().RefRadius();
+        break;
+      case GeomAbs_Sphere:
+        ax = s.Sphere().Position().Axis();
+        r = s.Sphere().Radius();
+        break;
+      case GeomAbs_Torus:
+        ax = s.Torus().Axis();
+        r = s.Torus().MajorRadius();
+        break;
+      case GeomAbs_SurfaceOfRevolution:
+        ax = s.AxeOfRevolution();
+        break;
+      default:
+        has = false;
+      }
+      if (has) {
+        const gp_Pnt o = ax.Location();
+        const gp_Dir d = ax.Direction();
+        const double w[8] = {1.0, o.X(), o.Y(), o.Z(), d.X(), d.Y(), d.Z(), r};
+        std::copy(w, w + 8, v);
+      }
+    } catch (const Standard_Failure &) {
+      // No axis for this face.
+    }
+    out.insert(out.end(), v, v + 8);
+  }
+}
+
+/// Per edge (MapShapes order), 8 values: a flag (1 for a circle or an arc of one, else 0), its
+/// center xyz, the unit normal of its plane xyz (the circle's own axis), and its radius.
+inline void cadrs_edge_circles(const TopoDS_Shape &shape, std::vector<double> &out) {
+  TopTools_IndexedMapOfShape edges;
+  TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+  for (Standard_Integer i = 1; i <= edges.Extent(); ++i) {
+    double v[8] = {0};
+    const TopoDS_Edge &edge = TopoDS::Edge(edges(i));
+    try {
+      if (!BRep_Tool::Degenerated(edge)) {
+        BRepAdaptor_Curve c(edge);
+        if (c.GetType() == GeomAbs_Circle) {
+          const gp_Circ circ = c.Circle();
+          const gp_Pnt o = circ.Location();
+          const gp_Dir d = circ.Axis().Direction();
+          const double w[8] = {1.0, o.X(), o.Y(), o.Z(), d.X(), d.Y(), d.Z(), circ.Radius()};
+          std::copy(w, w + 8, v);
+        }
+      }
+    } catch (const Standard_Failure &) {
+      // Not a circle we can read.
+    }
+    out.insert(out.end(), v, v + 8);
+  }
+}

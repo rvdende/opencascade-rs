@@ -620,4 +620,65 @@ impl Wire {
     pub fn to_shape(&self) -> Shape {
         Shape::from_shape(ffi::topo_ds::cast_wire_to_shape(&self.inner))
     }
+
+    /// Revolves the wire about the axis through `origin` along `axis` by `angle` radians into a
+    /// shell (one face per edge), with history.
+    pub fn try_revolve_h(&self, origin: DVec3, axis: DVec3, angle: f64) -> Result<(Shape, History), Error> {
+        let s = ffi::topo_ds::cast_wire_to_shape(&self.inner);
+        let (o, d) = (origin, axis);
+        with_history(|h| ffi::cadrs_safe::cadrs_revol_h(s, o.x, o.y, o.z, d.x, d.y, d.z, angle, h))
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Axes of curved faces and circular edges (cadrs P3.4)
+
+/// An axis in space with a radius: a cylinder's, cone's, sphere's or torus's axis, or a
+/// circle's center and normal.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AxisInfo {
+    pub origin: DVec3,
+    /// Unit direction.
+    pub dir: DVec3,
+    /// The cylinder's or circle's radius, a cone's reference radius, a torus's major radius, a
+    /// sphere's radius (0 for a general surface of revolution).
+    pub radius: f64,
+}
+
+fn axis_list(v: &cxx::CxxVector<f64>) -> Vec<Option<AxisInfo>> {
+    v.as_slice()
+        .chunks_exact(8)
+        .map(|c| {
+            (c[0] > 0.5).then(|| AxisInfo {
+                origin: dvec3(c[1], c[2], c[3]),
+                dir: dvec3(c[4], c[5], c[6]),
+                radius: c[7],
+            })
+        })
+        .collect()
+}
+
+impl Shape {
+    /// Revolves the shape (a face, wire, shell, ...) about the axis through `origin` along
+    /// `axis` by `angle` radians, with history.
+    pub fn try_revolve_h(&self, origin: DVec3, axis: DVec3, angle: f64) -> Result<(Shape, History), Error> {
+        let (o, d) = (origin, axis);
+        with_history(|h| ffi::cadrs_safe::cadrs_revol_h(&self.inner, o.x, o.y, o.z, d.x, d.y, d.z, angle, h))
+    }
+
+    /// Per face (MapShapes order): its axis, for cylinders, cones, spheres, tori and surfaces of
+    /// revolution.
+    pub fn face_axes(&self) -> Result<Vec<Option<AxisInfo>>, Error> {
+        let mut v = ffi::cadrs_safe::cadrs_new_f64_vec();
+        ffi::cadrs_safe::cadrs_face_axes(&self.inner, v.pin_mut()).map_err(occt)?;
+        Ok(axis_list(&v))
+    }
+
+    /// Per edge (MapShapes order): its circle (center, plane normal, radius), for circles and
+    /// arcs.
+    pub fn edge_circles(&self) -> Result<Vec<Option<AxisInfo>>, Error> {
+        let mut v = ffi::cadrs_safe::cadrs_new_f64_vec();
+        ffi::cadrs_safe::cadrs_edge_circles(&self.inner, v.pin_mut()).map_err(occt)?;
+        Ok(axis_list(&v))
+    }
 }

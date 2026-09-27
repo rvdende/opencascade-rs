@@ -242,5 +242,9 @@ mod inner {
             out: Pin<&mut CxxVector<f64>>,
         ) -> Result<()>;
         pub fn cadrs_bbox(shape: &TopoDS_Shape, out: Pin<&mut CxxVector<f64>>) -> Result<()>;
+
+        // Axes of curved faces and circles (cadrs P3.4)
+        pub fn cadrs_face_axes(shape: &TopoDS_Shape, out: Pin<&mut CxxVector<f64>>) -> Result<()>;
+        pub fn cadrs_edge_circles(shape: &TopoDS_Shape, out: Pin<&mut CxxVector<f64>>) -> Result<()>;
     }
 }
