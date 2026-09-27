@@ -61,6 +61,7 @@ template <typename Try, typename Fail> static void trycatch(Try &&func, Fail &&f
 #include <Poly_PolygonOnTriangulation.hxx>
 #include <Poly_Triangulation.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
+#include <BRepTools_History.hxx>
 #include <BRepBuilderAPI_MakeShape.hxx>
 #include <GCPnts_AbscissaPoint.hxx>
 #include <TopExp.hxx>
@@ -778,6 +779,26 @@ inline std::unique_ptr<TopoDS_Shape> cadrs_thicken_h(const TopoDS_Shape &shape, 
   }
   const TopoDS_Shape result = make.Shape();
   cadrs_history(make, {&shape}, result, nullptr, nullptr, hist);
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
+}
+
+/// `BRepTools_History` with the `Generated` / `Modified` / `IsDeleted` interface `cadrs_history`
+/// reads.
+struct cadrs_tools_history {
+  Handle(BRepTools_History) h;
+  const TopTools_ListOfShape &Generated(const TopoDS_Shape &s) { return h->Generated(s); }
+  const TopTools_ListOfShape &Modified(const TopoDS_Shape &s) { return h->Modified(s); }
+  bool IsDeleted(const TopoDS_Shape &s) { return h->IsRemoved(s); }
+};
+
+/// [`cadrs_unify`] with history: faces merged into one are listed as modified into it.
+inline std::unique_ptr<TopoDS_Shape> cadrs_unify_h(const TopoDS_Shape &shape, std::vector<int32_t> &hist) {
+  ShapeUpgrade_UnifySameDomain unify(shape, Standard_True, Standard_True, Standard_True);
+  unify.AllowInternalEdges(Standard_False);
+  unify.Build();
+  const TopoDS_Shape result = unify.Shape();
+  cadrs_tools_history adapter{unify.History()};
+  cadrs_history(adapter, {&shape}, result, nullptr, nullptr, hist);
   return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
 }
 

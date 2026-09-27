@@ -568,6 +568,11 @@ impl Shape {
         with_history(|h| ffi::cadrs_safe::cadrs_thicken_h(&self.inner, offset, h))
     }
 
+    /// [`Shape::try_clean`] with history: faces merged into one are modified into it.
+    pub fn try_clean_h(&self) -> Result<(Shape, History), Error> {
+        with_history(|h| ffi::cadrs_safe::cadrs_unify_h(&self.inner, h))
+    }
+
     /// Every crossing of the line through `origin` along `dir` with a face, in no particular
     /// order.
     pub fn ray_hits(&self, origin: DVec3, dir: DVec3) -> Result<Vec<RayHit>, Error> {
