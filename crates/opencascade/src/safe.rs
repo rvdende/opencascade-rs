@@ -568,6 +568,12 @@ impl Shape {
         with_history(|h| ffi::cadrs_safe::cadrs_thicken_h(&self.inner, offset, h))
     }
 
+    /// [`Shape::try_union_h`], then each face of `self` merged with a face of `other` it meets
+    /// on the same surface (no seam where the two met; faces of one input stay apart).
+    pub fn try_union_clean_h(&self, other: &Shape) -> Result<(Shape, History), Error> {
+        with_history(|h| ffi::cadrs_safe::cadrs_fuse_clean_h(&self.inner, &other.inner, h))
+    }
+
     /// [`Shape::try_clean`] with history: faces merged into one are modified into it.
     pub fn try_clean_h(&self) -> Result<(Shape, History), Error> {
         with_history(|h| ffi::cadrs_safe::cadrs_unify_h(&self.inner, h))

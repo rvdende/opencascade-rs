@@ -225,6 +225,11 @@ mod inner {
             hist: Pin<&mut CxxVector<i32>>,
         ) -> Result<UniquePtr<TopoDS_Shape>>;
         pub fn cadrs_unify_h(shape: &TopoDS_Shape, hist: Pin<&mut CxxVector<i32>>) -> Result<UniquePtr<TopoDS_Shape>>;
+        pub fn cadrs_fuse_clean_h(
+            a: &TopoDS_Shape,
+            b: &TopoDS_Shape,
+            hist: Pin<&mut CxxVector<i32>>,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
         #[allow(clippy::too_many_arguments)]
         pub fn cadrs_ray_hits(
             shape: &TopoDS_Shape,

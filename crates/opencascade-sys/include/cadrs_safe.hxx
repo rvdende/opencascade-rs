@@ -62,6 +62,7 @@ template <typename Try, typename Fail> static void trycatch(Try &&func, Fail &&f
 #include <Poly_Triangulation.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <BRepTools_History.hxx>
+#include <TopTools_DataMapOfShapeInteger.hxx>
 #include <BRepBuilderAPI_MakeShape.hxx>
 #include <GCPnts_AbscissaPoint.hxx>
 #include <TopExp.hxx>
@@ -799,6 +800,112 @@ inline std::unique_ptr<TopoDS_Shape> cadrs_unify_h(const TopoDS_Shape &shape, st
   const TopoDS_Shape result = unify.Shape();
   cadrs_tools_history adapter{unify.History()};
   cadrs_history(adapter, {&shape}, result, nullptr, nullptr, hist);
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
+}
+
+/// Two histories one after the other (`first`, then `second` on its result), with the
+/// `Generated` / `Modified` / `IsDeleted` interface `cadrs_history` reads.
+template <typename First>
+struct cadrs_composed_history {
+  First &first;
+  Handle(BRepTools_History) second;
+  TopTools_ListOfShape out;
+
+  /// The images of `list` through `second` (a shape it left alone is its own image).
+  void through_second(const TopTools_ListOfShape &list) {
+    out.Clear();
+    for (TopTools_ListOfShape::Iterator it(list); it.More(); it.Next()) {
+      const TopoDS_Shape &x = it.Value();
+      if (second->IsRemoved(x)) {
+        continue;
+      }
+      const TopTools_ListOfShape &m = second->Modified(x);
+      if (m.IsEmpty()) {
+        out.Append(x);
+      } else {
+        for (TopTools_ListOfShape::Iterator jt(m); jt.More(); jt.Next()) {
+          out.Append(jt.Value());
+        }
+      }
+    }
+  }
+  const TopTools_ListOfShape &Generated(const TopoDS_Shape &s) {
+    TopTools_ListOfShape g = first.Generated(s);
+    through_second(g);
+    return out;
+  }
+  const TopTools_ListOfShape &Modified(const TopoDS_Shape &s) {
+    TopTools_ListOfShape m = first.Modified(s);
+    if (m.IsEmpty() && !first.IsDeleted(s)) {
+      m.Append(s);
+    }
+    through_second(m);
+    return out;
+  }
+  bool IsDeleted(const TopoDS_Shape &s) {
+    if (first.IsDeleted(s)) {
+      return true;
+    }
+    Modified(s);
+    return out.IsEmpty();
+  }
+};
+
+/// Fuses `a` and `b`, then merges each face of `a` with a face of `b` it meets on the same
+/// surface (the seam where the bodies met goes; faces of one input stay apart), with history
+/// (inputs: `a`, then `b`).
+inline std::unique_ptr<TopoDS_Shape> cadrs_fuse_clean_h(const TopoDS_Shape &a, const TopoDS_Shape &b,
+                                                       std::vector<int32_t> &hist) {
+  BRepAlgoAPI_Fuse fuse(a, b);
+  if (!fuse.IsDone() || fuse.HasErrors()) {
+    throw std::runtime_error("boolean operation failed");
+  }
+  const TopoDS_Shape fused = fuse.Shape();
+  // Which input each face of the fused shape came from (1: a, 2: b, 3: both).
+  TopTools_DataMapOfShapeInteger owner;
+  const TopoDS_Shape *inputs[2] = {&a, &b};
+  for (int k = 0; k < 2; ++k) {
+    for (TopExp_Explorer ex(*inputs[k], TopAbs_FACE); ex.More(); ex.Next()) {
+      TopTools_ListOfShape images;
+      if (fuse.IsDeleted(ex.Current())) {
+        continue;
+      }
+      if (fuse.Modified(ex.Current()).IsEmpty()) {
+        images.Append(ex.Current());
+      } else {
+        images = fuse.Modified(ex.Current());
+      }
+      for (TopTools_ListOfShape::Iterator it(images); it.More(); it.Next()) {
+        const int bit = 1 << k;
+        if (owner.IsBound(it.Value())) {
+          owner.ChangeFind(it.Value()) |= bit;
+        } else {
+          owner.Bind(it.Value(), bit);
+        }
+      }
+    }
+  }
+  // Keep every edge between two faces of the same input.
+  TopTools_IndexedDataMapOfShapeListOfShape edge_faces;
+  TopExp::MapShapesAndAncestors(fused, TopAbs_EDGE, TopAbs_FACE, edge_faces);
+  ShapeUpgrade_UnifySameDomain unify(fused, Standard_True, Standard_True, Standard_True);
+  unify.AllowInternalEdges(Standard_False);
+  for (Standard_Integer i = 1; i <= edge_faces.Extent(); ++i) {
+    const TopTools_ListOfShape &faces = edge_faces(i);
+    int mask = 3;
+    int n = 0;
+    for (TopTools_ListOfShape::Iterator it(faces); it.More(); it.Next()) {
+      mask &= owner.IsBound(it.Value()) ? owner.Find(it.Value()) : 0;
+      ++n;
+    }
+    if (n >= 2 && mask != 0) {
+      unify.KeepShape(edge_faces.FindKey(i));
+    }
+  }
+  unify.Build();
+  const TopoDS_Shape result = unify.Shape();
+  cadrs_composed_history<BRepAlgoAPI_Fuse> composed{fuse, unify.History(), {}};
+  cadrs_history(composed, {&a, &b}, result, nullptr, nullptr, hist);
   return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
 }
 
