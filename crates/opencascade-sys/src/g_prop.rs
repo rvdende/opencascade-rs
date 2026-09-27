@@ -16,5 +16,6 @@ mod inner {
         fn MomentOfInertia(self: &GProp_GProps, axis: &gp_Ax1) -> f64;
         fn RadiusOfGyration(self: &GProp_GProps, axis: &gp_Ax1) -> f64;
         fn GProp_GProps_CentreOfMass(props: &GProp_GProps) -> UniquePtr<gp_Pnt>;
+        fn GProp_GProps_MatrixOfInertia(props: &GProp_GProps, out: &mut [f64]);
     }
 }

@@ -283,6 +283,10 @@ pub struct MassProperties {
     pub volume: f64,
     pub surface_area: f64,
     pub center_of_mass: DVec3,
+    /// The volume's matrix of inertia (unit density) about `center_of_mass`, axes parallel to
+    /// the global axes, row-major: `[[Ixx, Ixy, Ixz], [Iyx, Iyy, Iyz], [Izx, Izy, Izz]]`. The
+    /// products carry the tensor's minus sign (`Ixy = -∫xy dV`), as OCCT's `MatrixOfInertia`.
+    pub inertia: [[f64; 3]; 3],
 }
 
 impl Shape {
@@ -312,11 +316,14 @@ impl Shape {
         );
 
         let center = ffi::g_prop::GProp_GProps_CentreOfMass(&volume_props);
+        let mut m = [0.0f64; 9];
+        ffi::g_prop::GProp_GProps_MatrixOfInertia(&volume_props, &mut m);
 
         MassProperties {
             volume: volume_props.Mass(),
             surface_area: surface_props.Mass(),
             center_of_mass: dvec3(center.X(), center.Y(), center.Z()),
+            inertia: [[m[0], m[1], m[2]], [m[3], m[4], m[5]], [m[6], m[7], m[8]]],
         }
     }
 
