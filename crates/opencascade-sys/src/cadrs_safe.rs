@@ -214,5 +214,27 @@ mod inner {
             points: Pin<&mut CxxVector<f64>>,
             edges: Pin<&mut CxxVector<i32>>,
         ) -> Result<()>;
+
+        // Sub-shapes, compounds, thickening, rays and bounding boxes (cadrs P3.3)
+        pub fn cadrs_sub_count(shape: &TopoDS_Shape, kind: i32) -> Result<i32>;
+        pub fn cadrs_sub_shape(shape: &TopoDS_Shape, kind: i32, index: i32) -> Result<UniquePtr<TopoDS_Shape>>;
+        pub fn cadrs_compound(shapes: &TopTools_ListOfShape) -> Result<UniquePtr<TopoDS_Shape>>;
+        pub fn cadrs_thicken_h(
+            shape: &TopoDS_Shape,
+            offset: f64,
+            hist: Pin<&mut CxxVector<i32>>,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
+        #[allow(clippy::too_many_arguments)]
+        pub fn cadrs_ray_hits(
+            shape: &TopoDS_Shape,
+            ox: f64,
+            oy: f64,
+            oz: f64,
+            dx: f64,
+            dy: f64,
+            dz: f64,
+            out: Pin<&mut CxxVector<f64>>,
+        ) -> Result<()>;
+        pub fn cadrs_bbox(shape: &TopoDS_Shape, out: Pin<&mut CxxVector<f64>>) -> Result<()>;
     }
 }

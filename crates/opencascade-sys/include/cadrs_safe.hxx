@@ -81,6 +81,12 @@ template <typename Try, typename Fail> static void trycatch(Try &&func, Fail &&f
 #include <gp_Elips.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Vec.hxx>
+#include <BRepBndLib.hxx>
+#include <BRepIntCurveSurface_Inter.hxx>
+#include <BRep_Builder.hxx>
+#include <Bnd_Box.hxx>
+#include <TopoDS_Compound.hxx>
+#include <gp_Lin.hxx>
 
 // ---------------------------------------------------------------------------------------------
 // Edges
@@ -708,4 +714,101 @@ inline std::unique_ptr<std::vector<double>> cadrs_new_f64_vec() {
 
 inline std::unique_ptr<std::vector<int32_t>> cadrs_new_i32_vec() {
   return std::unique_ptr<std::vector<int32_t>>(new std::vector<int32_t>());
+}
+
+// ---------------------------------------------------------------------------------------------
+// cadrs P3.3: sub-shapes, compounds, thickening, ray and bounding-box queries
+
+/// The `TopAbs_ShapeEnum` for cadrs's kind numbers: 0 solid, 1 shell, 2 face, 3 wire, 4 edge.
+inline TopAbs_ShapeEnum cadrs_kind(int32_t kind) {
+  switch (kind) {
+  case 0:
+    return TopAbs_SOLID;
+  case 1:
+    return TopAbs_SHELL;
+  case 2:
+    return TopAbs_FACE;
+  case 3:
+    return TopAbs_WIRE;
+  case 4:
+    return TopAbs_EDGE;
+  default:
+    throw std::runtime_error("unknown sub-shape kind");
+  }
+}
+
+/// The number of distinct sub-shapes of a kind (see `cadrs_kind`), in `TopExp::MapShapes` order.
+inline int32_t cadrs_sub_count(const TopoDS_Shape &shape, int32_t kind) {
+  TopTools_IndexedMapOfShape map;
+  TopExp::MapShapes(shape, cadrs_kind(kind), map);
+  return (int32_t)map.Extent();
+}
+
+/// The `index`-th (0-based) distinct sub-shape of a kind. It shares its faces, edges and vertices
+/// with `shape` (they are `IsSame`).
+inline std::unique_ptr<TopoDS_Shape> cadrs_sub_shape(const TopoDS_Shape &shape, int32_t kind, int32_t index) {
+  TopTools_IndexedMapOfShape map;
+  TopExp::MapShapes(shape, cadrs_kind(kind), map);
+  if (index < 0 || index >= map.Extent()) {
+    throw std::runtime_error("sub-shape index out of range");
+  }
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(map(index + 1)));
+}
+
+/// A compound of the shapes (they keep their sub-shapes).
+inline std::unique_ptr<TopoDS_Shape> cadrs_compound(const TopTools_ListOfShape &shapes) {
+  BRep_Builder builder;
+  TopoDS_Compound compound;
+  builder.MakeCompound(compound);
+  for (TopTools_ListOfShape::Iterator it(shapes); it.More(); it.Next()) {
+    builder.Add(compound, it.Value());
+  }
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(compound));
+}
+
+/// Thickens a shell or a face into a solid by `offset` along its normals
+/// (`BRepOffsetAPI_MakeThickSolid::MakeThickSolidBySimple`: flat walls along free edges), with
+/// history (see `cadrs_history`).
+inline std::unique_ptr<TopoDS_Shape> cadrs_thicken_h(const TopoDS_Shape &shape, double offset,
+                                                    std::vector<int32_t> &hist) {
+  BRepOffsetAPI_MakeThickSolid make;
+  make.MakeThickSolidBySimple(shape, offset);
+  if (!make.IsDone()) {
+    throw std::runtime_error("thickening failed");
+  }
+  const TopoDS_Shape result = make.Shape();
+  cadrs_history(make, {&shape}, result, nullptr, nullptr, hist);
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
+}
+
+/// Where the line through `o` along `d` crosses the faces of `shape`: per crossing, the face's
+/// index (MapShapes order), the line parameter (the distance along `d` for a unit `d`) and the
+/// point (5 numbers).
+inline void cadrs_ray_hits(const TopoDS_Shape &shape, double ox, double oy, double oz, double dx, double dy,
+                           double dz, std::vector<double> &out) {
+  TopTools_IndexedMapOfShape faces;
+  TopExp::MapShapes(shape, TopAbs_FACE, faces);
+  BRepIntCurveSurface_Inter inter;
+  inter.Init(shape, gp_Lin(gp_Pnt(ox, oy, oz), gp_Dir(dx, dy, dz)), 1e-7);
+  for (; inter.More(); inter.Next()) {
+    const gp_Pnt p = inter.Pnt();
+    out.push_back((double)(faces.FindIndex(inter.Face()) - 1));
+    out.push_back(inter.W());
+    out.push_back(p.X());
+    out.push_back(p.Y());
+    out.push_back(p.Z());
+  }
+}
+
+/// A tight axis-aligned bounding box from the exact geometry: min xyz, then max xyz.
+inline void cadrs_bbox(const TopoDS_Shape &shape, std::vector<double> &out) {
+  Bnd_Box box;
+  BRepBndLib::AddOptimal(shape, box, Standard_False, Standard_False);
+  if (box.IsVoid()) {
+    throw std::runtime_error("the shape is empty");
+  }
+  double x0, y0, z0, x1, y1, z1;
+  box.Get(x0, y0, z0, x1, y1, z1);
+  const double v[6] = {x0, y0, z0, x1, y1, z1};
+  out.insert(out.end(), v, v + 6);
 }

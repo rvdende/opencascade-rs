@@ -518,3 +518,95 @@ impl Shape {
         Ok(points.into_iter().zip(entries(edges.as_slice())).collect())
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Sub-shapes, compounds, thickening, rays and bounding boxes (cadrs P3.3)
+
+/// A kind of sub-shape, for [`Shape::sub_shapes`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubKind {
+    Solid = 0,
+    Shell = 1,
+    Face = 2,
+    Wire = 3,
+    Edge = 4,
+}
+
+/// Where a line crosses a face of a shape ([`Shape::ray_hits`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RayHit {
+    /// The face's index (MapShapes order).
+    pub face: usize,
+    /// The line parameter: the distance from the origin along a unit direction.
+    pub t: f64,
+    pub point: DVec3,
+}
+
+impl Shape {
+    /// The number of distinct sub-shapes of a kind.
+    pub fn sub_count(&self, kind: SubKind) -> Result<usize, Error> {
+        Ok(ffi::cadrs_safe::cadrs_sub_count(&self.inner, kind as i32).map_err(occt)?.max(0) as usize)
+    }
+
+    /// The distinct sub-shapes of a kind (MapShapes order). They share their faces, edges and
+    /// vertices with this shape.
+    pub fn sub_shapes(&self, kind: SubKind) -> Result<Vec<Shape>, Error> {
+        (0..self.sub_count(kind)?)
+            .map(|i| shape(ffi::cadrs_safe::cadrs_sub_shape(&self.inner, kind as i32, i as i32).map_err(occt)?))
+            .collect()
+    }
+
+    /// A compound of the shapes (sharing their sub-shapes).
+    pub fn try_compound<'a>(shapes: impl IntoIterator<Item = &'a Shape>) -> Result<Shape, Error> {
+        let list = shape_list(shapes.into_iter().map(|s| &*s.inner));
+        shape(ffi::cadrs_safe::cadrs_compound(&list).map_err(occt)?)
+    }
+
+    /// Thickens a shell or a face into a solid, `offset` along its normals (flat walls along its
+    /// free edges), with history.
+    pub fn try_thicken_h(&self, offset: f64) -> Result<(Shape, History), Error> {
+        with_history(|h| ffi::cadrs_safe::cadrs_thicken_h(&self.inner, offset, h))
+    }
+
+    /// Every crossing of the line through `origin` along `dir` with a face, in no particular
+    /// order.
+    pub fn ray_hits(&self, origin: DVec3, dir: DVec3) -> Result<Vec<RayHit>, Error> {
+        let mut v = ffi::cadrs_safe::cadrs_new_f64_vec();
+        let (o, d) = (origin, dir);
+        ffi::cadrs_safe::cadrs_ray_hits(&self.inner, o.x, o.y, o.z, d.x, d.y, d.z, v.pin_mut()).map_err(occt)?;
+        Ok(v.as_slice()
+            .chunks_exact(5)
+            .map(|c| RayHit {
+                face: c[0].max(0.0) as usize,
+                t: c[1],
+                point: dvec3(c[2], c[3], c[4]),
+            })
+            .collect())
+    }
+
+    /// A tight axis-aligned bounding box (min, max) from the exact geometry.
+    pub fn bbox(&self) -> Result<(DVec3, DVec3), Error> {
+        let mut v = ffi::cadrs_safe::cadrs_new_f64_vec();
+        ffi::cadrs_safe::cadrs_bbox(&self.inner, v.pin_mut()).map_err(occt)?;
+        let s = v.as_slice();
+        Ok((dvec3(s[0], s[1], s[2]), dvec3(s[3], s[4], s[5])))
+    }
+}
+
+impl Wire {
+    /// Sweeps the wire along `dir` into a shell (one face per edge), with history.
+    pub fn try_extrude_h(&self, dir: DVec3) -> Result<(Shape, History), Error> {
+        let s = ffi::topo_ds::cast_wire_to_shape(&self.inner);
+        with_history(|h| ffi::cadrs_safe::cadrs_prism_h(s, dir.x, dir.y, dir.z, h))
+    }
+
+    /// The wire's edges (MapShapes order), with their exact geometry.
+    pub fn edges_geometry(&self) -> Result<Vec<EdgeGeometry>, Error> {
+        edges_geometry(ffi::topo_ds::cast_wire_to_shape(&self.inner))
+    }
+
+    /// The wire as a shape.
+    pub fn to_shape(&self) -> Shape {
+        Shape::from_shape(ffi::topo_ds::cast_wire_to_shape(&self.inner))
+    }
+}
