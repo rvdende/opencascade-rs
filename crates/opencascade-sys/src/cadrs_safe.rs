@@ -351,5 +351,11 @@ mod inner {
             hist: Pin<&mut CxxVector<i32>>,
         ) -> Result<UniquePtr<TopoDS_Shape>>;
         pub fn cadrs_classify(shape: &TopoDS_Shape, x: f64, y: f64, z: f64, tol: f64) -> Result<i32>;
+        pub fn cadrs_split_faces_h(
+            shape: &TopoDS_Shape,
+            faces: &[i32],
+            tool: &TopoDS_Shape,
+            hist: Pin<&mut CxxVector<i32>>,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
     }
 }

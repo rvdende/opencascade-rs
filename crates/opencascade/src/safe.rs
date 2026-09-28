@@ -928,6 +928,13 @@ impl Shape {
         with_history(|h| ffi::cadrs_safe::cadrs_face_tool_h(&self.inner, &idx, h))
     }
 
+    /// This shape with the faces `faces` (explorer indices) split where `tool` (a face or a
+    /// shell) crosses them, with history: each split face continues into its pieces.
+    pub fn try_split_faces_h(&self, faces: &[usize], tool: &Shape) -> Result<(Shape, History), Error> {
+        let idx: Vec<i32> = faces.iter().map(|&f| f as i32).collect();
+        with_history(|h| ffi::cadrs_safe::cadrs_split_faces_h(&self.inner, &idx, &tool.inner, h))
+    }
+
     /// Where `p` is relative to the solid.
     pub fn classify(&self, p: DVec3, tol: f64) -> Result<PointState, Error> {
         let s = ffi::cadrs_safe::cadrs_classify(&self.inner, p.x, p.y, p.z, tol).map_err(occt)?;

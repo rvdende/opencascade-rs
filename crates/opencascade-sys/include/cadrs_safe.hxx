@@ -1816,3 +1816,48 @@ inline int32_t cadrs_classify(const TopoDS_Shape &shape, double x, double y, dou
     return 3;
   }
 }
+
+// ---------------------------------------------------------------------------------------------
+// P3.8: face split
+
+#include <BRepAlgoAPI_Section.hxx>
+#include <BRepFeat_SplitShape.hxx>
+
+/// `shape` with the faces `faces` (indices from 0) split where `tool` (a face or a shell) crosses
+/// them (`BRepAlgoAPI_Section` for the curves, `BRepFeat_SplitShape` to cut the faces): still one
+/// body, with more faces; the other faces are as they were (their edges split where a curve ends
+/// on them). History input: `shape` (a split face continues into each of its pieces).
+inline std::unique_ptr<TopoDS_Shape> cadrs_split_faces_h(const TopoDS_Shape &shape, rust::Slice<const int32_t> faces,
+                                                        const TopoDS_Shape &tool, std::vector<int32_t> &hist) {
+  TopTools_IndexedMapOfShape map;
+  TopExp::MapShapes(shape, TopAbs_FACE, map);
+  BRepFeat_SplitShape split(shape);
+  bool any = false;
+  for (int32_t i : faces) {
+    if (i < 0 || i >= map.Extent()) {
+      throw std::runtime_error("unknown face");
+    }
+    const TopoDS_Face face = TopoDS::Face(map(i + 1));
+    BRepAlgoAPI_Section section(face, tool, Standard_False);
+    section.ComputePCurveOn1(Standard_True);
+    section.Approximation(Standard_True);
+    section.Build();
+    if (!section.IsDone() || section.HasErrors()) {
+      throw std::runtime_error("the faces could not be intersected with the tool");
+    }
+    for (TopExp_Explorer e(section.Shape(), TopAbs_EDGE); e.More(); e.Next()) {
+      split.Add(TopoDS::Edge(e.Current()), face);
+      any = true;
+    }
+  }
+  if (!any) {
+    throw std::runtime_error("the tool doesn't cross the faces");
+  }
+  split.Build();
+  if (!split.IsDone()) {
+    throw std::runtime_error("face split failed");
+  }
+  const TopoDS_Shape result = split.Shape();
+  cadrs_history(split, {&shape}, result, nullptr, nullptr, hist);
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
+}
