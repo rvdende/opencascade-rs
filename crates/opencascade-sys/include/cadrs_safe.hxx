@@ -1861,3 +1861,134 @@ inline std::unique_ptr<TopoDS_Shape> cadrs_split_faces_h(const TopoDS_Shape &sha
   cadrs_history(split, {&shape}, result, nullptr, nullptr, hist);
   return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
 }
+
+// ---------------------------------------------------------------------------------------------
+// P3C.2: hidden line removal (drawing views)
+
+#include <BRepLib.hxx>
+#include <GCPnts_QuasiUniformDeflection.hxx>
+#include <HLRAlgo_Projector.hxx>
+#include <HLRBRep_Algo.hxx>
+#include <HLRBRep_HLRToShape.hxx>
+#include <HLRBRep_PolyAlgo.hxx>
+#include <HLRBRep_PolyHLRToShape.hxx>
+
+/// Appends the edges of `compound` (HLR output: edges in the projector's XY plane) to `out`,
+/// each as `[category, kind, n, sx, sy, ex, ey, mx, my, cx, cy, r, x0, y0, ... x(n-1), y(n-1)]`.
+/// `kind`: 0 line, 1 circle (centre `c`, radius `r`), 2 other. `m` is the point halfway along
+/// the edge's parameter range. The polyline has at least two points.
+inline void cadrs_hlr_edges(const TopoDS_Shape &compound, int category, double deflection,
+                            std::vector<double> &out) {
+  if (compound.IsNull()) {
+    return;
+  }
+  TopoDS_Shape c = compound;
+  BRepLib::BuildCurves3d(c);
+  for (TopExp_Explorer e(c, TopAbs_EDGE); e.More(); e.Next()) {
+    const TopoDS_Edge edge = TopoDS::Edge(e.Current());
+    if (BRep_Tool::Degenerated(edge)) {
+      continue;
+    }
+    BRepAdaptor_Curve curve(edge);
+    const double f = curve.FirstParameter();
+    const double l = curve.LastParameter();
+    const gp_Pnt ps = curve.Value(f);
+    const gp_Pnt pe = curve.Value(l);
+    const gp_Pnt pm = curve.Value(0.5 * (f + l));
+    int kind = 2;
+    double cx = 0.0, cy = 0.0, r = 0.0;
+    std::vector<double> pts;
+    switch (curve.GetType()) {
+    case GeomAbs_Line:
+      kind = 0;
+      pts = {ps.X(), ps.Y(), pe.X(), pe.Y()};
+      break;
+    case GeomAbs_Circle: {
+      kind = 1;
+      const gp_Circ circ = curve.Circle();
+      cx = circ.Location().X();
+      cy = circ.Location().Y();
+      r = circ.Radius();
+      break;
+    }
+    default:
+      break;
+    }
+    if (pts.empty()) {
+      GCPnts_QuasiUniformDeflection sampler(curve, deflection, f, l);
+      if (sampler.IsDone() && sampler.NbPoints() >= 2) {
+        for (int i = 1; i <= sampler.NbPoints(); ++i) {
+          const gp_Pnt p = sampler.Value(i);
+          pts.push_back(p.X());
+          pts.push_back(p.Y());
+        }
+      } else {
+        pts = {ps.X(), ps.Y(), pm.X(), pm.Y(), pe.X(), pe.Y()};
+      }
+    }
+    out.push_back(category);
+    out.push_back(kind);
+    out.push_back((double)(pts.size() / 2));
+    const double head[] = {ps.X(), ps.Y(), pe.X(), pe.Y(), pm.X(), pm.Y(), cx, cy, r};
+    out.insert(out.end(), head, head + 9);
+    out.insert(out.end(), pts.begin(), pts.end());
+  }
+}
+
+/// Hidden line removal of `shape` seen along `d` (the direction of sight, from the eye into the
+/// scene) with `x` as the drawing's x axis, orthographic, about the origin `o`. The projector's
+/// frame is `gp_Ax2(o, -d, x)`: 2D x along `x`, 2D y along `x × d` (up in the view), depth
+/// towards the eye. `exact`: `HLRBRep_Algo` (exact curves); otherwise `HLRBRep_PolyAlgo` on a
+/// mesh with `mesh_deflection` (only straight segments). Categories in `out`: 0 visible sharp,
+/// 1 visible smooth (G1, tangent), 2 visible outline (silhouette), 3 hidden sharp, 4 hidden
+/// smooth, 5 hidden outline. See `cadrs_hlr_edges` for the record layout.
+inline void cadrs_hlr(const TopoDS_Shape &shape, double ox, double oy, double oz, double dx, double dy, double dz,
+                      double xx, double xy, double xz, bool exact, double mesh_deflection, double deflection,
+                      std::vector<double> &out) {
+  out.clear();
+  if (shape.IsNull()) {
+    throw std::runtime_error("null shape");
+  }
+  if (deflection <= 0.0) {
+    throw std::runtime_error("the tolerance must be positive");
+  }
+  const gp_Dir dir(-dx, -dy, -dz);
+  const gp_Dir xdir(xx, xy, xz);
+  if (dir.IsParallel(xdir, 1e-9)) {
+    throw std::runtime_error("the view's x axis is parallel to the view direction");
+  }
+  // gp_Ax2 keeps the main direction and makes x perpendicular to it.
+  const gp_Ax2 frame(gp_Pnt(ox, oy, oz), dir, xdir);
+  const HLRAlgo_Projector projector(frame);
+  if (exact) {
+    Handle(HLRBRep_Algo) algo = new HLRBRep_Algo();
+    algo->Add(shape);
+    algo->Projector(projector);
+    algo->Update();
+    algo->Hide();
+    HLRBRep_HLRToShape result(algo);
+    cadrs_hlr_edges(result.VCompound(), 0, deflection, out);
+    cadrs_hlr_edges(result.Rg1LineVCompound(), 1, deflection, out);
+    cadrs_hlr_edges(result.OutLineVCompound(), 2, deflection, out);
+    cadrs_hlr_edges(result.HCompound(), 3, deflection, out);
+    cadrs_hlr_edges(result.Rg1LineHCompound(), 4, deflection, out);
+    cadrs_hlr_edges(result.OutLineHCompound(), 5, deflection, out);
+  } else {
+    if (mesh_deflection <= 0.0) {
+      throw std::runtime_error("the mesh deflection must be positive");
+    }
+    BRepMesh_IncrementalMesh mesh(shape, mesh_deflection, Standard_False, 0.5, Standard_False);
+    Handle(HLRBRep_PolyAlgo) algo = new HLRBRep_PolyAlgo();
+    algo->Load(shape);
+    algo->Projector(projector);
+    algo->Update();
+    HLRBRep_PolyHLRToShape result;
+    result.Update(algo);
+    cadrs_hlr_edges(result.VCompound(), 0, deflection, out);
+    cadrs_hlr_edges(result.Rg1LineVCompound(), 1, deflection, out);
+    cadrs_hlr_edges(result.OutLineVCompound(), 2, deflection, out);
+    cadrs_hlr_edges(result.HCompound(), 3, deflection, out);
+    cadrs_hlr_edges(result.Rg1LineHCompound(), 4, deflection, out);
+    cadrs_hlr_edges(result.OutLineHCompound(), 5, deflection, out);
+  }
+}

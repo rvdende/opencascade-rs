@@ -357,5 +357,24 @@ mod inner {
             tool: &TopoDS_Shape,
             hist: Pin<&mut CxxVector<i32>>,
         ) -> Result<UniquePtr<TopoDS_Shape>>;
+
+        // Hidden line removal (drawing views)
+        #[allow(clippy::too_many_arguments)]
+        pub fn cadrs_hlr(
+            shape: &TopoDS_Shape,
+            ox: f64,
+            oy: f64,
+            oz: f64,
+            dx: f64,
+            dy: f64,
+            dz: f64,
+            xx: f64,
+            xy: f64,
+            xz: f64,
+            exact: bool,
+            mesh_deflection: f64,
+            deflection: f64,
+            out: Pin<&mut CxxVector<f64>>,
+        ) -> Result<()>;
     }
 }

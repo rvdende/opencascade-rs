@@ -5,6 +5,7 @@ const OCCT_VERSION: (u8, u8) = (7, 8);
 
 /// The list of used OpenCASCADE libraries which needs to be linked with.
 const OCCT_LIBS: &[&str] = &[
+    "TKHLR",
     "TKMath",
     "TKernel",
     "TKDE",

@@ -2,6 +2,7 @@ use thiserror::Error;
 
 pub mod angle;
 pub mod bounding_box;
+pub mod hlr;
 pub mod kicad;
 pub mod mesh;
 pub mod primitives;
