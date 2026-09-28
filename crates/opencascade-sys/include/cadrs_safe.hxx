@@ -1631,3 +1631,164 @@ inline std::unique_ptr<TopoDS_Shape> cadrs_split_h(const TopoDS_Shape &shape, co
   cadrs_history(split, inputs, result, nullptr, nullptr, hist);
   return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
 }
+
+// ---------------------------------------------------------------------------------------------
+// P3.8: transforms with reflections, face tools, point classification
+
+#include <BRepBuilderAPI_Transform.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
+#include <ShapeAnalysis_FreeBounds.hxx>
+#include <TopTools_HSequenceOfShape.hxx>
+#include <gp_Trsf.hxx>
+
+/// A copy of `shape` moved by the affine map `x ↦ M·x + t`, `m` = the 3 × 4 matrix row by row
+/// (M's columns orthonormal: a rotation, or a reflection when det M = −1). A reflection's faces
+/// are rebuilt with their orientation corrected (`BRepBuilderAPI_Transform` copies through
+/// `BRepTools_TrsfModification` for a negative transform), so the copy is a valid solid.
+/// History input: `shape`.
+inline std::unique_ptr<TopoDS_Shape> cadrs_transform_h(const TopoDS_Shape &shape, rust::Slice<const double> m,
+                                                      std::vector<int32_t> &hist) {
+  if (m.size() != 12) {
+    throw std::runtime_error("a transform needs 12 values");
+  }
+  gp_Trsf trsf;
+  trsf.SetValues(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]);
+  BRepBuilderAPI_Transform make(shape, trsf, Standard_True);
+  if (!make.IsDone()) {
+    throw std::runtime_error("transform failed");
+  }
+  const TopoDS_Shape result = make.Shape();
+  cadrs_history(make, {&shape}, result, nullptr, nullptr, hist);
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
+}
+
+/// The solid bounded by the faces `faces` of `shape` (indices from 0) and a flat cap across each
+/// loop of their free edges: the pocket (or boss) those faces bound, as a face pattern or face
+/// mirror copies it. A loop that isn't flat is an error. History input: `shape` (each picked
+/// face becomes its face of the tool, the others are deleted); the caps are the `first` faces.
+inline std::unique_ptr<TopoDS_Shape> cadrs_face_tool_h(const TopoDS_Shape &shape, rust::Slice<const int32_t> faces,
+                                                      std::vector<int32_t> &hist) {
+  TopTools_IndexedMapOfShape map;
+  TopExp::MapShapes(shape, TopAbs_FACE, map);
+  BRep_Builder builder;
+  TopoDS_Compound picked;
+  builder.MakeCompound(picked);
+  std::vector<TopoDS_Shape> picked_faces;
+  for (int32_t i : faces) {
+    if (i < 0 || i >= map.Extent()) {
+      throw std::runtime_error("no such face");
+    }
+    builder.Add(picked, map(i + 1));
+    picked_faces.push_back(map(i + 1));
+  }
+  if (picked_faces.empty()) {
+    throw std::runtime_error("no faces");
+  }
+  // The free edges: used by one picked face only (a seam, used twice by one face, isn't).
+  TopTools_IndexedDataMapOfShapeListOfShape edge_faces;
+  TopExp::MapShapesAndUniqueAncestors(picked, TopAbs_EDGE, TopAbs_FACE, edge_faces);
+  Handle(TopTools_HSequenceOfShape) free_edges = new TopTools_HSequenceOfShape();
+  for (Standard_Integer i = 1; i <= edge_faces.Extent(); ++i) {
+    const TopoDS_Edge &e = TopoDS::Edge(edge_faces.FindKey(i));
+    const TopTools_ListOfShape &around = edge_faces(i);
+    if (around.Extent() != 1 || BRep_Tool::Degenerated(e)) {
+      continue;
+    }
+    if (BRep_Tool::IsClosed(e, TopoDS::Face(around.First()))) {
+      continue;
+    }
+    free_edges->Append(e);
+  }
+  BRepBuilderAPI_Sewing sew(1e-6);
+  for (const TopoDS_Shape &f : picked_faces) {
+    sew.Add(f);
+  }
+  TopoDS_Compound caps;
+  builder.MakeCompound(caps);
+  if (free_edges->Length() > 0) {
+    Handle(TopTools_HSequenceOfShape) wires;
+    ShapeAnalysis_FreeBounds::ConnectEdgesToWires(free_edges, 1e-6, Standard_True, wires);
+    for (Standard_Integer i = 1; i <= wires->Length(); ++i) {
+      const TopoDS_Wire w = TopoDS::Wire(wires->Value(i));
+      if (!BRep_Tool::IsClosed(w)) {
+        throw std::runtime_error("the faces' free edges don't close up into loops");
+      }
+      BRepBuilderAPI_MakeFace cap(w, Standard_True);
+      if (!cap.IsDone()) {
+        throw std::runtime_error("the faces' opening isn't flat");
+      }
+      builder.Add(caps, cap.Face());
+      sew.Add(cap.Face());
+    }
+  }
+  sew.Perform();
+  const TopoDS_Shape sewn = sew.SewedShape();
+  TopExp_Explorer shells(sewn, TopAbs_SHELL);
+  if (!shells.More()) {
+    throw std::runtime_error("the faces don't enclose a volume");
+  }
+  BRepBuilderAPI_MakeSolid make(TopoDS::Shell(shells.Current()));
+  if (!make.IsDone()) {
+    throw std::runtime_error("the faces don't enclose a volume");
+  }
+  TopoDS_Solid solid = make.Solid();
+  BRepLib::OrientClosedSolid(solid);
+  const TopoDS_Shape result = solid;
+  // History, in `cadrs_history`'s layout.
+  TopTools_IndexedMapOfShape res;
+  TopExp::MapShapes(result, TopAbs_FACE, res);
+  hist.push_back((int32_t)map.Extent());
+  for (Standard_Integer i = 1; i <= map.Extent(); ++i) {
+    const TopoDS_Shape &f = map(i);
+    bool is_picked = false;
+    for (const TopoDS_Shape &p : picked_faces) {
+      if (p.IsSame(f)) {
+        is_picked = true;
+      }
+    }
+    if (!is_picked) {
+      hist.push_back(0);
+      continue;
+    }
+    TopTools_ListOfShape now;
+    now.Append(sew.IsModified(f) ? sew.Modified(f) : f);
+    cadrs_hist_entry(now, res, hist);
+  }
+  TopTools_IndexedMapOfShape edges, vertices;
+  TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+  TopExp::MapShapes(shape, TopAbs_VERTEX, vertices);
+  hist.push_back((int32_t)edges.Extent());
+  for (Standard_Integer i = 1; i <= edges.Extent(); ++i) {
+    hist.push_back(0);
+  }
+  hist.push_back((int32_t)vertices.Extent());
+  for (Standard_Integer i = 1; i <= vertices.Extent(); ++i) {
+    hist.push_back(0);
+  }
+  TopTools_ListOfShape cap_faces;
+  for (TopExp_Explorer ex(caps, TopAbs_FACE); ex.More(); ex.Next()) {
+    const TopoDS_Shape &c = ex.Current();
+    cap_faces.Append(sew.IsModified(c) ? sew.Modified(c) : c);
+  }
+  hist.push_back(1);
+  cadrs_hist_entry(cap_faces, res, hist);
+  hist.push_back(1);
+  hist.push_back(0);
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
+}
+
+/// Where a point is relative to a solid (`BRepClass3d_SolidClassifier`): 0 inside, 1 outside,
+/// 2 on its boundary (within `tol`), 3 unknown.
+inline int32_t cadrs_classify(const TopoDS_Shape &shape, double x, double y, double z, double tol) {
+  BRepClass3d_SolidClassifier c(shape, gp_Pnt(x, y, z), tol);
+  switch (c.State()) {
+  case TopAbs_IN:
+    return 0;
+  case TopAbs_OUT:
+    return 1;
+  case TopAbs_ON:
+    return 2;
+  default:
+    return 3;
+  }
+}

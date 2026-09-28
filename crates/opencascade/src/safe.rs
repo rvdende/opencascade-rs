@@ -913,4 +913,38 @@ impl Shape {
         let list = shape_list(tools.iter().map(|s| &*s.inner));
         with_history(|h| ffi::cadrs_safe::cadrs_split_h(&self.inner, &list, h))
     }
+
+    /// A copy moved by `x ↦ M·x + t` (`m`: the 3 × 4 matrix `[M | t]` row by row; M orthonormal,
+    /// a rotation or a reflection), with history. Reflections come out as valid solids.
+    pub fn try_transform_h(&self, m: &[f64; 12]) -> Result<(Shape, History), Error> {
+        with_history(|h| ffi::cadrs_safe::cadrs_transform_h(&self.inner, m, h))
+    }
+
+    /// The solid bounded by the faces `faces` (explorer indices) and a flat cap across each loop
+    /// of their free edges (a pocket's or a boss's volume), with history: each face continues its
+    /// picked face; the caps are [`History::first`].
+    pub fn try_face_tool_h(&self, faces: &[usize]) -> Result<(Shape, History), Error> {
+        let idx: Vec<i32> = faces.iter().map(|&f| f as i32).collect();
+        with_history(|h| ffi::cadrs_safe::cadrs_face_tool_h(&self.inner, &idx, h))
+    }
+
+    /// Where `p` is relative to the solid.
+    pub fn classify(&self, p: DVec3, tol: f64) -> Result<PointState, Error> {
+        let s = ffi::cadrs_safe::cadrs_classify(&self.inner, p.x, p.y, p.z, tol).map_err(occt)?;
+        Ok(match s {
+            0 => PointState::Inside,
+            1 => PointState::Outside,
+            2 => PointState::On,
+            _ => PointState::Unknown,
+        })
+    }
+}
+
+/// Where a point is relative to a solid ([`Shape::classify`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointState {
+    Inside,
+    Outside,
+    On,
+    Unknown,
 }

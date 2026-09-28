@@ -338,5 +338,18 @@ mod inner {
             tools: &TopTools_ListOfShape,
             hist: Pin<&mut CxxVector<i32>>,
         ) -> Result<UniquePtr<TopoDS_Shape>>;
+
+        // P3.8
+        pub fn cadrs_transform_h(
+            shape: &TopoDS_Shape,
+            m: &[f64],
+            hist: Pin<&mut CxxVector<i32>>,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
+        pub fn cadrs_face_tool_h(
+            shape: &TopoDS_Shape,
+            faces: &[i32],
+            hist: Pin<&mut CxxVector<i32>>,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
+        pub fn cadrs_classify(shape: &TopoDS_Shape, x: f64, y: f64, z: f64, tol: f64) -> Result<i32>;
     }
 }
