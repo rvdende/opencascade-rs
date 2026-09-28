@@ -78,6 +78,10 @@ template <typename Try, typename Fail> static void trycatch(Try &&func, Fail &&f
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Wire.hxx>
 #include <gp_Ax1.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepLProp_SLProps.hxx>
+#include <Geom2d_Curve.hxx>
+#include <TColgp_Array1OfPnt2d.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Elips.hxx>
@@ -1023,4 +1027,137 @@ inline void cadrs_edge_circles(const TopoDS_Shape &shape, std::vector<double> &o
     }
     out.insert(out.end(), v, v + 8);
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// cadrs P3.6: fillets with a radius per edge (constant or varying), face normals along edges,
+// validity checks
+
+/// Fillet of `edges` with a radius per edge: `counts[i]` (t, r) pairs for edge i in `data`, `t`
+/// in [0, 1] along the edge's parameter range. One pair gives the edge a constant radius; more
+/// give it a radius that varies through them (`SetRadius(UandR, IC, IinC)`). OCCT continues a
+/// fillet along tangent-connected edges (its contours); an edge already in a contour is not
+/// added again, but its radius is still set.
+inline std::unique_ptr<TopoDS_Shape> cadrs_fillet_var_h(const TopoDS_Shape &shape, const TopTools_ListOfShape &edges,
+                                                       rust::Slice<const int32_t> counts,
+                                                       rust::Slice<const double> data, std::vector<int32_t> &hist) {
+  BRepFilletAPI_MakeFillet make(shape);
+  std::vector<TopoDS_Edge> list;
+  for (TopTools_ListOfShape::Iterator it(edges); it.More(); it.Next()) {
+    list.push_back(TopoDS::Edge(it.Value()));
+  }
+  if (list.size() != counts.size()) {
+    throw std::runtime_error("fillet: a radius is needed for each edge");
+  }
+  size_t at = 0;
+  std::vector<size_t> starts;
+  for (size_t i = 0; i < list.size(); ++i) {
+    starts.push_back(at);
+    if (counts[i] < 1) {
+      throw std::runtime_error("fillet: an edge has no radius");
+    }
+    at += 2 * (size_t)counts[i];
+  }
+  if (at > data.size()) {
+    throw std::runtime_error("fillet: missing radius data");
+  }
+  // Add every edge first (with its first radius), then set each edge's own radii.
+  for (size_t i = 0; i < list.size(); ++i) {
+    if (make.Contour(list[i]) == 0) {
+      make.Add(data[starts[i] + 1], list[i]);
+    }
+  }
+  for (size_t i = 0; i < list.size(); ++i) {
+    const Standard_Integer ic = make.Contour(list[i]);
+    if (ic == 0) {
+      throw std::runtime_error("fillet: an edge could not be added");
+    }
+    Standard_Integer iinc = 0;
+    for (Standard_Integer k = 1; k <= make.NbEdges(ic); ++k) {
+      if (make.Edge(ic, k).IsSame(list[i])) {
+        iinc = k;
+      }
+    }
+    if (iinc == 0) {
+      throw std::runtime_error("fillet: an edge is not in its contour");
+    }
+    const size_t n = (size_t)counts[i];
+    const double *d = data.data() + starts[i];
+    if (n == 1) {
+      make.SetRadius(d[1], ic, iinc);
+      continue;
+    }
+    double f = 0.0, l = 0.0;
+    BRep_Tool::Range(list[i], f, l);
+    TColgp_Array1OfPnt2d uandr(1, (Standard_Integer)n);
+    for (size_t k = 0; k < n; ++k) {
+      uandr.SetValue((Standard_Integer)k + 1, gp_Pnt2d(f + d[2 * k] * (l - f), d[2 * k + 1]));
+    }
+    make.SetRadius(uandr, ic, iinc);
+  }
+  make.Build();
+  if (!make.IsDone()) {
+    throw std::runtime_error("fillet failed");
+  }
+  const TopoDS_Shape result = make.Shape();
+  cadrs_history(make, {&shape}, result, nullptr, nullptr, hist);
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
+}
+
+/// Along edge `index` (MapShapes order, 0-based) at `samples` evenly spaced parameters: 10 values
+/// each, t in [0, 1], the point xyz, and the outward unit normal (xyz) of each of the two faces
+/// around the edge, in the order `cadrs_edge_faces` lists them (zeros where a normal can't be
+/// found or there is no second face).
+inline void cadrs_edge_normals(const TopoDS_Shape &shape, int32_t index, int32_t samples, std::vector<double> &out) {
+  TopTools_IndexedMapOfShape edges;
+  TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+  if (index < 0 || index >= edges.Extent() || samples < 2) {
+    throw std::runtime_error("edge normals: no such edge");
+  }
+  const TopoDS_Edge &edge = TopoDS::Edge(edges(index + 1));
+  TopTools_IndexedDataMapOfShapeListOfShape around;
+  TopExp::MapShapesAndUniqueAncestors(shape, TopAbs_EDGE, TopAbs_FACE, around);
+  std::vector<TopoDS_Face> faces;
+  const Standard_Integer j = around.FindIndex(edge);
+  if (j > 0) {
+    for (TopTools_ListOfShape::Iterator it(around(j)); it.More(); it.Next()) {
+      faces.push_back(TopoDS::Face(it.Value()));
+    }
+  }
+  double f = 0.0, l = 0.0;
+  BRep_Tool::Range(edge, f, l);
+  BRepAdaptor_Curve curve(edge);
+  for (int32_t s = 0; s < samples; ++s) {
+    const double t = (double)s / (double)(samples - 1);
+    const double u = f + t * (l - f);
+    const gp_Pnt p = curve.Value(u);
+    double v[10] = {t, p.X(), p.Y(), p.Z(), 0, 0, 0, 0, 0, 0};
+    for (size_t k = 0; k < faces.size() && k < 2; ++k) {
+      double pf = 0.0, pl = 0.0;
+      Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(edge, faces[k], pf, pl);
+      if (pc.IsNull()) {
+        continue;
+      }
+      const gp_Pnt2d uv = pc->Value(u);
+      BRepAdaptor_Surface surf(faces[k]);
+      BRepLProp_SLProps props(surf, uv.X(), uv.Y(), 1, 1e-9);
+      if (!props.IsNormalDefined()) {
+        continue;
+      }
+      gp_Dir n = props.Normal();
+      if (faces[k].Orientation() == TopAbs_REVERSED) {
+        n.Reverse();
+      }
+      v[4 + 3 * k] = n.X();
+      v[5 + 3 * k] = n.Y();
+      v[6 + 3 * k] = n.Z();
+    }
+    out.insert(out.end(), v, v + 10);
+  }
+}
+
+/// True if `shape` passes OCCT's topology and geometry checks (`BRepCheck_Analyzer`).
+inline bool cadrs_is_valid(const TopoDS_Shape &shape) {
+  BRepCheck_Analyzer check(shape);
+  return check.IsValid();
 }

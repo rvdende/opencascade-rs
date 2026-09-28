@@ -246,5 +246,21 @@ mod inner {
         // Axes of curved faces and circles (cadrs P3.4)
         pub fn cadrs_face_axes(shape: &TopoDS_Shape, out: Pin<&mut CxxVector<f64>>) -> Result<()>;
         pub fn cadrs_edge_circles(shape: &TopoDS_Shape, out: Pin<&mut CxxVector<f64>>) -> Result<()>;
+
+        // Fillets with a radius per edge, face normals along an edge, validity (cadrs P3.6)
+        pub fn cadrs_fillet_var_h(
+            shape: &TopoDS_Shape,
+            edges: &TopTools_ListOfShape,
+            counts: &[i32],
+            data: &[f64],
+            hist: Pin<&mut CxxVector<i32>>,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
+        pub fn cadrs_edge_normals(
+            shape: &TopoDS_Shape,
+            index: i32,
+            samples: i32,
+            out: Pin<&mut CxxVector<f64>>,
+        ) -> Result<()>;
+        pub fn cadrs_is_valid(shape: &TopoDS_Shape) -> Result<bool>;
     }
 }

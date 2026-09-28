@@ -681,4 +681,51 @@ impl Shape {
         ffi::cadrs_safe::cadrs_edge_circles(&self.inner, v.pin_mut()).map_err(occt)?;
         Ok(axis_list(&v))
     }
+
+    /// Fillets `edges`, each with its own radius: one `(t, r)` pair for a constant radius,
+    /// several for a radius that varies along the edge through them (`t` in [0, 1] along the
+    /// edge's parameter range). With history.
+    pub fn try_fillet_variable_h<'a>(
+        &self,
+        edges: impl IntoIterator<Item = (&'a Edge, &'a [(f64, f64)])>,
+    ) -> Result<(Shape, History), Error> {
+        let pairs: Vec<(&Edge, &[(f64, f64)])> = edges.into_iter().collect();
+        let list = shape_list(pairs.iter().map(|(e, _)| ffi::topo_ds::cast_edge_to_shape(&e.inner)));
+        let counts: Vec<i32> = pairs.iter().map(|(_, r)| r.len() as i32).collect();
+        let data: Vec<f64> = pairs
+            .iter()
+            .flat_map(|(_, r)| r.iter().flat_map(|(t, r)| [*t, *r]))
+            .collect();
+        with_history(|h| ffi::cadrs_safe::cadrs_fillet_var_h(&self.inner, &list, &counts, &data, h))
+    }
+
+    /// Along edge `index` (MapShapes order), at `samples` evenly spaced parameters: the
+    /// parameter `t` in [0, 1], the point, and the outward unit normals of the faces on either
+    /// side (in `edge_faces` order; zero where there is none).
+    pub fn edge_normals(&self, index: usize, samples: usize) -> Result<Vec<EdgeNormals>, Error> {
+        let mut v = ffi::cadrs_safe::cadrs_new_f64_vec();
+        ffi::cadrs_safe::cadrs_edge_normals(&self.inner, index as i32, samples as i32, v.pin_mut())
+            .map_err(occt)?;
+        Ok(v.as_slice()
+            .chunks_exact(10)
+            .map(|c| EdgeNormals {
+                t: c[0],
+                point: dvec3(c[1], c[2], c[3]),
+                normals: [dvec3(c[4], c[5], c[6]), dvec3(c[7], c[8], c[9])],
+            })
+            .collect())
+    }
+
+    /// True if the shape passes OCCT's checks (`BRepCheck_Analyzer`).
+    pub fn is_valid(&self) -> Result<bool, Error> {
+        ffi::cadrs_safe::cadrs_is_valid(&self.inner).map_err(occt)
+    }
+}
+
+/// A sample along an edge: see [`Shape::edge_normals`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EdgeNormals {
+    pub t: f64,
+    pub point: DVec3,
+    pub normals: [DVec3; 2],
 }
