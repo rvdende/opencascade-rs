@@ -376,5 +376,39 @@ mod inner {
             deflection: f64,
             out: Pin<&mut CxxVector<f64>>,
         ) -> Result<()>;
+
+        // Draft, offset, surface derivatives and sewing (cadrs P3.10)
+        #[allow(clippy::too_many_arguments)]
+        pub fn cadrs_draft_h(
+            shape: &TopoDS_Shape,
+            faces: &[i32],
+            angles: &[f64],
+            dx: f64,
+            dy: f64,
+            dz: f64,
+            px: f64,
+            py: f64,
+            pz: f64,
+            nx: f64,
+            ny: f64,
+            nz: f64,
+            tangent: bool,
+            hist: Pin<&mut CxxVector<i32>>,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
+        pub fn cadrs_offset_h(
+            shape: &TopoDS_Shape,
+            faces: &[i32],
+            offsets: &[f64],
+            offset: f64,
+            sharp: bool,
+            hist: Pin<&mut CxxVector<i32>>,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
+        pub fn cadrs_face_derivs(
+            shape: &TopoDS_Shape,
+            index: i32,
+            points: &[f64],
+            out: Pin<&mut CxxVector<f64>>,
+        ) -> Result<()>;
+        pub fn cadrs_sew_solid(shapes: &TopTools_ListOfShape, tol: f64) -> Result<UniquePtr<TopoDS_Shape>>;
     }
 }

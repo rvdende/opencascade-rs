@@ -1458,9 +1458,12 @@ inline std::unique_ptr<TopoDS_Shape> cadrs_thru_sections_h(const TopTools_ListOf
 /// The derivative across the sections at one end of a loft ([`cadrs_loft_solid`]): `spec` is
 /// `[mode, x, y, z, cx, cy, cz, scale]`. Mode 0: none (the loft's curvature is zero there);
 /// 1: the vector (x, y, z) at every point; 2: in the plane with normal (x, y, z), away from the
-/// point c (or towards it for a negative scale), `scale` long.
+/// point c (or towards it for a negative scale), `scale` long. Modes 3 and 4 (cadrs P3.10: Match
+/// tangent and Match curvature) give a vector per sample instead: `[3, (dx, dy, dz) × patches ×
+/// n]` or `[4, (dx, dy, dz, ax, ay, az) × patches × n]` with the second derivative `a`; they are
+/// read by `cadrs_loft_sample_vecs`, and this function reports them as absent.
 static bool cadrs_loft_derivative(rust::Slice<const double> spec, const gp_Pnt &pole, gp_Vec &out) {
-  if (spec.size() < 8 || spec[0] < 0.5) {
+  if (spec.size() < 8 || spec[0] < 0.5 || spec[0] > 2.5) {
     return false;
   }
   if (spec[0] < 1.5) {
@@ -1476,6 +1479,47 @@ static bool cadrs_loft_derivative(rust::Slice<const double> spec, const gp_Pnt &
     out = r.Normalized() * spec[7];
   }
   return true;
+}
+
+
+/// Modes 3 and 4 of a loft end's spec: the per-sample derivative (`second` false) or second
+/// derivative (true) of patch `p` turned into one vector per pole of `section` (the section's
+/// B-spline through the samples `samples`, at `uparams`): the vectors are interpolated as the
+/// section is (the interpolation is linear, so the poles of `samples + vectors` less the
+/// section's poles are the vectors' poles). Empty if the spec has none.
+static std::vector<gp_Vec> cadrs_loft_sample_vecs(rust::Slice<const double> spec, bool second, int p, int n,
+                                                  bool periodic, const Handle(TColStd_HArray1OfReal) & uparams,
+                                                  const std::vector<gp_Pnt> &samples,
+                                                  const Handle(Geom_BSplineCurve) & section) {
+  std::vector<gp_Vec> out;
+  if (spec.size() < 1 || spec[0] < 2.5) {
+    return out;
+  }
+  const int stride = spec[0] < 3.5 ? 3 : 6;
+  if (second && stride == 3) {
+    return out;
+  }
+  if (spec.size() < 1 + (size_t)(p + 1) * n * stride) {
+    throw std::runtime_error("bad loft end vectors");
+  }
+  Handle(TColgp_HArray1OfPnt) pts = new TColgp_HArray1OfPnt(1, n);
+  for (int j = 0; j < n; ++j) {
+    const size_t o = 1 + ((size_t)p * n + j) * stride + (second ? 3 : 0);
+    pts->SetValue(j + 1, samples[j].Translated(gp_Vec(spec[o], spec[o + 1], spec[o + 2])));
+  }
+  GeomAPI_Interpolate interp(pts, uparams, periodic, 1e-12);
+  interp.Perform();
+  if (!interp.IsDone()) {
+    throw std::runtime_error("a loft end's vectors could not be interpolated");
+  }
+  const Handle(Geom_BSplineCurve) c = interp.Curve();
+  if (c->NbPoles() != section->NbPoles()) {
+    throw std::runtime_error("a loft end's vectors are not compatible with its section");
+  }
+  for (int j = 1; j <= c->NbPoles(); ++j) {
+    out.push_back(gp_Vec(section->Pole(j), c->Pole(j)));
+  }
+  return out;
 }
 
 /// A loft built from sample points (cadrs P3.7: lofts with start and end conditions, which
@@ -1506,11 +1550,18 @@ inline std::unique_ptr<TopoDS_Shape> cadrs_loft_solid(rust::Slice<const double> 
       uparams->SetValue(j + 1, (double)j / (double)(periodic ? n : n - 1));
     }
     std::vector<Handle(Geom_BSplineCurve)> sections;
+    std::vector<gp_Pnt> first_samples, last_samples;
     for (int i = 0; i < k; ++i) {
       Handle(TColgp_HArray1OfPnt) pts = new TColgp_HArray1OfPnt(1, n);
       for (int j = 0; j < n; ++j) {
         const size_t o = (((size_t)p * k + i) * n + j) * 3;
         pts->SetValue(j + 1, gp_Pnt(points[o], points[o + 1], points[o + 2]));
+        if (i == 0) {
+          first_samples.push_back(pts->Value(j + 1));
+        }
+        if (i == k - 1) {
+          last_samples.push_back(pts->Value(j + 1));
+        }
       }
       GeomAPI_Interpolate interp(pts, uparams, periodic, 1e-12);
       interp.Perform();
@@ -1526,6 +1577,17 @@ inline std::unique_ptr<TopoDS_Shape> cadrs_loft_solid(rust::Slice<const double> 
         throw std::runtime_error("loft sections are not compatible");
       }
     }
+    // Per-sample end vectors (Match tangent, Match curvature), as vectors per pole.
+    const std::vector<gp_Vec> d0s =
+        cadrs_loft_sample_vecs(start, false, p, n, periodic, uparams, first_samples, sections.front());
+    const std::vector<gp_Vec> a0s =
+        cadrs_loft_sample_vecs(start, true, p, n, periodic, uparams, first_samples, sections.front());
+    const std::vector<gp_Vec> d1s = cadrs_loft_sample_vecs(end, false, p, n, periodic, uparams, last_samples, sections.back());
+    const std::vector<gp_Vec> a1s = cadrs_loft_sample_vecs(end, true, p, n, periodic, uparams, last_samples, sections.back());
+    const bool curvature = !a0s.empty() || !a1s.empty();
+    if (curvature && k != 2) {
+      throw std::runtime_error("Match curvature takes two profiles");
+    }
     // Across the sections, one pole column at a time.
     Handle(TColStd_HArray1OfReal) vp = new TColStd_HArray1OfReal(1, k);
     for (int i = 0; i < k; ++i) {
@@ -1537,10 +1599,47 @@ inline std::unique_ptr<TopoDS_Shape> cadrs_loft_solid(rust::Slice<const double> 
       for (int i = 0; i < k; ++i) {
         col->SetValue(i + 1, sections[i]->Pole(j));
       }
-      GeomAPI_Interpolate interp(col, vp, Standard_False, 1e-12);
       gp_Vec d0, d1;
-      const bool has0 = cadrs_loft_derivative(start, col->Value(1), d0);
-      const bool has1 = cadrs_loft_derivative(end, col->Value(k), d1);
+      bool has0 = cadrs_loft_derivative(start, col->Value(1), d0);
+      bool has1 = cadrs_loft_derivative(end, col->Value(k), d1);
+      if (!d0s.empty()) {
+        d0 = d0s[j - 1];
+        has0 = true;
+      }
+      if (!d1s.empty()) {
+        d1 = d1s[j - 1];
+        has1 = true;
+      }
+      if (curvature) {
+        // A quintic Hermite column from the first section to the last: the end derivatives and
+        // second derivatives given (a free end: the chord, no second derivative).
+        const gp_Pnt P0 = col->Value(1), P1 = col->Value(2);
+        const gp_Vec chord(P0, P1);
+        const gp_Vec D0 = has0 ? d0 : chord, D1 = has1 ? d1 : chord;
+        const gp_Vec A0 = a0s.empty() ? gp_Vec(0, 0, 0) : a0s[j - 1];
+        const gp_Vec A1 = a1s.empty() ? gp_Vec(0, 0, 0) : a1s[j - 1];
+        TColgp_Array1OfPnt q(1, 6);
+        q.SetValue(1, P0);
+        q.SetValue(2, P0.Translated(D0 / 5.0));
+        q.SetValue(3, P0.Translated(D0 * 0.4 + A0 / 20.0));
+        q.SetValue(4, P1.Translated(D1 * -0.4 + A1 / 20.0));
+        q.SetValue(5, P1.Translated(D1 / -5.0));
+        q.SetValue(6, P1);
+        TColStd_Array1OfReal qk(1, 2);
+        qk.SetValue(1, vparams[0]);
+        qk.SetValue(2, vparams[1]);
+        TColStd_Array1OfInteger qm(1, 2);
+        qm.SetValue(1, 6);
+        qm.SetValue(2, 6);
+        // Derivatives are with respect to v in [v0, v1]; rescale for another span.
+        const double span = vparams[1] - vparams[0];
+        if (std::abs(span - 1.0) > 1e-12) {
+          throw std::runtime_error("Match curvature needs the loft's parameters on [0, 1]");
+        }
+        columns.push_back(new Geom_BSplineCurve(q, qk, qm, 5));
+        continue;
+      }
+      GeomAPI_Interpolate interp(col, vp, Standard_False, 1e-12);
       if (has0 || has1) {
         TColgp_Array1OfVec tangents(1, k);
         Handle(TColStd_HArray1OfBoolean) flags = new TColStd_HArray1OfBoolean(1, k);
@@ -1991,4 +2090,144 @@ inline void cadrs_hlr(const TopoDS_Shape &shape, double ox, double oy, double oz
     cadrs_hlr_edges(result.Rg1LineHCompound(), 4, deflection, out);
     cadrs_hlr_edges(result.OutLineHCompound(), 5, deflection, out);
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Draft, offset, surface derivatives and sewing (cadrs P3.10)
+
+#include <BRepOffsetAPI_DraftAngle.hxx>
+#include <BRepOffset_MakeOffset.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <ShapeAnalysis_Surface.hxx>
+#include <gp_Pln.hxx>
+
+/// Drafts the faces `faces` (MapShapes indices) of `shape` (`BRepOffsetAPI_DraftAngle`): each is
+/// turned by its angle (`angles`, radians) about where it meets the neutral plane (through p
+/// with normal n), for the pull direction d; `tangent` also drafts the faces tangent to them.
+/// With history.
+inline std::unique_ptr<TopoDS_Shape> cadrs_draft_h(const TopoDS_Shape &shape, rust::Slice<const int32_t> faces,
+                                                   rust::Slice<const double> angles, double dx, double dy, double dz,
+                                                   double px, double py, double pz, double nx, double ny, double nz,
+                                                   bool tangent, std::vector<int32_t> &hist) {
+  if (faces.size() != angles.size() || faces.empty()) {
+    throw std::runtime_error("draft: one angle per face");
+  }
+  TopTools_IndexedMapOfShape map;
+  TopExp::MapShapes(shape, TopAbs_FACE, map);
+  BRepOffsetAPI_DraftAngle draft(shape);
+  const gp_Dir dir(dx, dy, dz);
+  const gp_Pln neutral(gp_Pnt(px, py, pz), gp_Dir(nx, ny, nz));
+  for (size_t i = 0; i < faces.size(); ++i) {
+    const int32_t f = faces[i];
+    if (f < 0 || f >= map.Extent()) {
+      throw std::runtime_error("draft: no such face");
+    }
+    const TopoDS_Face &face = TopoDS::Face(map(f + 1));
+    draft.Add(face, dir, angles[i], neutral, tangent);
+    if (!draft.AddDone()) {
+      throw std::runtime_error("a face can't be drafted (it may be parallel to the pull direction's plane, or not a "
+                               "plane, cylinder or cone)");
+    }
+  }
+  draft.Build();
+  if (!draft.IsDone()) {
+    throw std::runtime_error("the draft could not be built");
+  }
+  const TopoDS_Shape result = draft.Shape();
+  cadrs_history(draft, {&shape}, result, nullptr, nullptr, hist);
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
+}
+
+/// The solid `shape` offset by `offset` (outward when positive; `BRepOffset_MakeOffset`),
+/// with the faces `faces` (MapShapes indices) offset by their own `offsets` instead; `sharp`
+/// joins the offset faces by intersection (a box stays a box), else by arcs (rounded edges).
+/// With history.
+inline std::unique_ptr<TopoDS_Shape> cadrs_offset_h(const TopoDS_Shape &shape, rust::Slice<const int32_t> faces,
+                                                    rust::Slice<const double> offsets, double offset, bool sharp,
+                                                    std::vector<int32_t> &hist) {
+  if (faces.size() != offsets.size()) {
+    throw std::runtime_error("offset: one value per face");
+  }
+  TopTools_IndexedMapOfShape map;
+  TopExp::MapShapes(shape, TopAbs_FACE, map);
+  BRepOffset_MakeOffset make;
+  make.Initialize(shape, offset, 1e-7, BRepOffset_Skin, Standard_False, Standard_False,
+                  sharp ? GeomAbs_Intersection : GeomAbs_Arc, Standard_False, Standard_False);
+  for (size_t i = 0; i < faces.size(); ++i) {
+    if (faces[i] < 0 || faces[i] >= map.Extent()) {
+      throw std::runtime_error("offset: no such face");
+    }
+    make.SetOffsetOnFace(TopoDS::Face(map(faces[i] + 1)), offsets[i]);
+  }
+  make.MakeOffsetShape();
+  if (!make.IsDone()) {
+    throw std::runtime_error("the offset could not be built");
+  }
+  const TopoDS_Shape result = make.Shape();
+  cadrs_history(make, {&shape}, result, nullptr, nullptr, hist);
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
+}
+
+/// At each point of `points` (x, y, z triples), projected onto face `index` (MapShapes order)
+/// of `shape`: the point on the surface, the face's outward unit normal, and the surface's
+/// derivatives D1U, D1V, D2U, D2V, D2UV there (21 values per point; all zero where the point
+/// doesn't project).
+inline void cadrs_face_derivs(const TopoDS_Shape &shape, int32_t index, rust::Slice<const double> points,
+                              std::vector<double> &out) {
+  TopTools_IndexedMapOfShape map;
+  TopExp::MapShapes(shape, TopAbs_FACE, map);
+  if (index < 0 || index >= map.Extent()) {
+    throw std::runtime_error("face derivatives: no such face");
+  }
+  const TopoDS_Face &face = TopoDS::Face(map(index + 1));
+  Handle(Geom_Surface) surf = BRep_Tool::Surface(face);
+  BRepAdaptor_Surface ad(face);
+  // ShapeAnalysis_Surface also finds points on the surface's boundary (where Extrema may not).
+  Handle(ShapeAnalysis_Surface) sas = new ShapeAnalysis_Surface(surf);
+  for (size_t i = 0; i + 2 < points.size(); i += 3) {
+    const gp_Pnt q(points[i], points[i + 1], points[i + 2]);
+    const gp_Pnt2d uv = sas->ValueOfUV(q, 1e-7);
+    const double u = uv.X(), v = uv.Y();
+    gp_Pnt p;
+    gp_Vec d1u, d1v, d2u, d2v, d2uv;
+    ad.D2(u, v, p, d1u, d1v, d2u, d2v, d2uv);
+    gp_Vec n = d1u.Crossed(d1v);
+    if (n.Magnitude() > 1e-300) {
+      n.Normalize();
+    }
+    if (face.Orientation() == TopAbs_REVERSED) {
+      n.Reverse();
+    }
+    const gp_Vec vs[6] = {n, d1u, d1v, d2u, d2v, d2uv};
+    out.push_back(p.X());
+    out.push_back(p.Y());
+    out.push_back(p.Z());
+    for (const gp_Vec &x : vs) {
+      out.push_back(x.X());
+      out.push_back(x.Y());
+      out.push_back(x.Z());
+    }
+  }
+}
+
+/// The faces and shells `shapes` sewn together (within `tol`) and made a solid, oriented
+/// outward.
+inline std::unique_ptr<TopoDS_Shape> cadrs_sew_solid(const TopTools_ListOfShape &shapes, double tol) {
+  BRepBuilderAPI_Sewing sew(tol);
+  for (TopTools_ListOfShape::Iterator it(shapes); it.More(); it.Next()) {
+    sew.Add(it.Value());
+  }
+  sew.Perform();
+  const TopoDS_Shape sewn = sew.SewedShape();
+  TopExp_Explorer shells(sewn, TopAbs_SHELL);
+  if (!shells.More()) {
+    throw std::runtime_error("the faces do not sew into a shell");
+  }
+  BRepBuilderAPI_MakeSolid make(TopoDS::Shell(shells.Current()));
+  if (!make.IsDone()) {
+    throw std::runtime_error("the sewn faces could not be made solid");
+  }
+  TopoDS_Solid result = make.Solid();
+  BRepLib::OrientClosedSolid(result);
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
 }

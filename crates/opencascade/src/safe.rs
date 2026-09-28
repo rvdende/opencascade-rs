@@ -755,7 +755,7 @@ pub enum SweepMode {
 }
 
 /// The derivative across the sections at one end of [`Shape::try_loft_solid`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LoftDerivative {
     /// None: the loft is free there (its second derivative is zero).
     Free,
@@ -764,14 +764,36 @@ pub enum LoftDerivative {
     /// In the plane with this normal, away from `center` (towards it for a negative
     /// `length`), `length` long.
     Radial { normal: DVec3, center: DVec3, length: f64 },
+    /// A vector per sample (cadrs P3.10, Match tangent): `first[p][j]` at sample j of patch p,
+    /// and optionally the second derivative there (Match curvature; the loft then needs two
+    /// sections and its columns are quintic).
+    Samples { first: Vec<Vec<DVec3>>, second: Option<Vec<Vec<DVec3>>> },
 }
 
 impl LoftDerivative {
-    fn spec(&self) -> [f64; 8] {
-        match *self {
-            LoftDerivative::Free => [0.0; 8],
-            LoftDerivative::Vector(v) => [1.0, v.x, v.y, v.z, 0.0, 0.0, 0.0, 0.0],
-            LoftDerivative::Radial { normal: n, center: c, length } => [2.0, n.x, n.y, n.z, c.x, c.y, c.z, length],
+    fn spec(&self) -> Vec<f64> {
+        match self {
+            LoftDerivative::Free => vec![0.0; 8],
+            LoftDerivative::Vector(v) => vec![1.0, v.x, v.y, v.z, 0.0, 0.0, 0.0, 0.0],
+            LoftDerivative::Radial { normal: n, center: c, length } => vec![2.0, n.x, n.y, n.z, c.x, c.y, c.z, *length],
+            LoftDerivative::Samples { first, second } => {
+                let mut v = vec![if second.is_some() { 4.0 } else { 3.0 }];
+                for (p, patch) in first.iter().enumerate() {
+                    for (j, d) in patch.iter().enumerate() {
+                        v.extend([d.x, d.y, d.z]);
+                        if let Some(a) = second.as_ref().and_then(|s| s.get(p)).and_then(|s| s.get(j)) {
+                            v.extend([a.x, a.y, a.z]);
+                        } else if second.is_some() {
+                            v.extend([0.0, 0.0, 0.0]);
+                        }
+                    }
+                }
+                // At least the 8 values the older modes read.
+                while v.len() < 8 {
+                    v.push(0.0);
+                }
+                v
+            }
         }
     }
 }
@@ -954,4 +976,98 @@ pub enum PointState {
     Outside,
     On,
     Unknown,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Draft, offset, surface derivatives and sewing (cadrs P3.10)
+
+/// A point on a face with the face's outward normal and the surface's derivatives there
+/// ([`Shape::face_derivatives`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FaceDerivatives {
+    pub point: DVec3,
+    /// The face's outward unit normal (zero where the point didn't project).
+    pub normal: DVec3,
+    pub d1u: DVec3,
+    pub d1v: DVec3,
+    pub d2u: DVec3,
+    pub d2v: DVec3,
+    pub d2uv: DVec3,
+}
+
+impl FaceDerivatives {
+    /// The normal curvature of the face in the tangent direction `dir` (with respect to the
+    /// outward normal: negative where the face curves away from it, as a cylinder's outside):
+    /// `II(d, d) / I(d, d)`, `dir` written in the D1U, D1V basis.
+    pub fn normal_curvature(&self, dir: DVec3) -> f64 {
+        let (e, f, g) = (self.d1u.dot(self.d1u), self.d1u.dot(self.d1v), self.d1v.dot(self.d1v));
+        let det = e * g - f * f;
+        if det.abs() < 1e-300 {
+            return 0.0;
+        }
+        let (bu, bv) = (dir.dot(self.d1u), dir.dot(self.d1v));
+        let a = (g * bu - f * bv) / det;
+        let b = (e * bv - f * bu) / det;
+        let n = self.normal;
+        let second = a * a * self.d2u.dot(n) + 2.0 * a * b * self.d2uv.dot(n) + b * b * self.d2v.dot(n);
+        let first = a * a * e + 2.0 * a * b * f + b * b * g;
+        if first.abs() < 1e-300 {
+            0.0
+        } else {
+            second / first
+        }
+    }
+}
+
+impl Shape {
+    /// The faces `faces` (explorer indices) drafted by `angles` (radians, one per face) for the
+    /// pull direction `dir`, about where they meet the neutral plane through `point` with
+    /// normal `normal` (`BRepOffsetAPI_DraftAngle`); `tangent` drafts the faces tangent to them
+    /// too. With history.
+    pub fn try_draft_h(
+        &self,
+        faces: &[usize],
+        angles: &[f64],
+        dir: DVec3,
+        point: DVec3,
+        normal: DVec3,
+        tangent: bool,
+    ) -> Result<(Shape, History), Error> {
+        let idx: Vec<i32> = faces.iter().map(|&f| f as i32).collect();
+        let (d, p, n) = (dir, point, normal);
+        with_history(|h| {
+            ffi::cadrs_safe::cadrs_draft_h(
+                &self.inner, &idx, angles, d.x, d.y, d.z, p.x, p.y, p.z, n.x, n.y, n.z, tangent, h,
+            )
+        })
+    }
+
+    /// The solid offset by `offset` (outward when positive), with the faces `faces` (explorer
+    /// indices) offset by their own `offsets`; `sharp` keeps edges sharp (faces joined by
+    /// intersection) instead of rounding them. With history.
+    pub fn try_offset_h(&self, faces: &[usize], offsets: &[f64], offset: f64, sharp: bool) -> Result<(Shape, History), Error> {
+        let idx: Vec<i32> = faces.iter().map(|&f| f as i32).collect();
+        with_history(|h| ffi::cadrs_safe::cadrs_offset_h(&self.inner, &idx, offsets, offset, sharp, h))
+    }
+
+    /// The points `points` projected onto face `index` (explorer order), with the face's
+    /// outward normal and the surface's derivatives there.
+    pub fn face_derivatives(&self, index: usize, points: &[DVec3]) -> Result<Vec<FaceDerivatives>, Error> {
+        let flat: Vec<f64> = points.iter().flat_map(|p| [p.x, p.y, p.z]).collect();
+        let mut v = ffi::cadrs_safe::cadrs_new_f64_vec();
+        ffi::cadrs_safe::cadrs_face_derivs(&self.inner, index as i32, &flat, v.pin_mut()).map_err(occt)?;
+        Ok(v.as_slice()
+            .chunks_exact(21)
+            .map(|c| {
+                let at = |i: usize| dvec3(c[i], c[i + 1], c[i + 2]);
+                FaceDerivatives { point: at(0), normal: at(3), d1u: at(6), d1v: at(9), d2u: at(12), d2v: at(15), d2uv: at(18) }
+            })
+            .collect())
+    }
+
+    /// The faces and shells `shapes` sewn together within `tol` and made an outward solid.
+    pub fn try_sew_solid(shapes: &[&Shape], tol: f64) -> Result<Shape, Error> {
+        let list = shape_list(shapes.iter().map(|s| &*s.inner));
+        shape(ffi::cadrs_safe::cadrs_sew_solid(&list, tol).map_err(occt)?)
+    }
 }
