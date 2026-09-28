@@ -882,12 +882,35 @@ struct cadrs_composed_history {
 /// Fuses `a` and `b`, then merges each face of `a` with a face of `b` it meets on the same
 /// surface (the seam where the bodies met goes; faces of one input stay apart), with history
 /// (inputs: `a`, then `b`).
+inline double cadrs_volume_of(const TopoDS_Shape &s) {
+  GProp_GProps props;
+  BRepGProp::VolumeProperties(s, props);
+  return props.Mass();
+}
+
 inline std::unique_ptr<TopoDS_Shape> cadrs_fuse_clean_h(const TopoDS_Shape &a, const TopoDS_Shape &b,
                                                        std::vector<int32_t> &hist) {
-  BRepAlgoAPI_Fuse fuse(a, b);
-  if (!fuse.IsDone() || fuse.HasErrors()) {
+  std::unique_ptr<BRepAlgoAPI_Fuse> made(new BRepAlgoAPI_Fuse(a, b));
+  if (!made->IsDone() || made->HasErrors()) {
     throw std::runtime_error("boolean operation failed");
   }
+  // P3.8: OCCT can get a union wrong one way round and right the other (a half cylinder and
+  // its mirror image across their flat side): a union smaller than either input or larger than
+  // both together is tried again with the inputs swapped.
+  {
+    const double va = cadrs_volume_of(a), vb = cadrs_volume_of(b), vf = cadrs_volume_of(made->Shape());
+    const double tol = 1e-7 * std::max(1.0, std::abs(va) + std::abs(vb));
+    if (vf < std::max(va, vb) - tol || vf > va + vb + tol) {
+      std::unique_ptr<BRepAlgoAPI_Fuse> swapped(new BRepAlgoAPI_Fuse(b, a));
+      if (swapped->IsDone() && !swapped->HasErrors()) {
+        const double vs = cadrs_volume_of(swapped->Shape());
+        if (vs >= std::max(va, vb) - tol && vs <= va + vb + tol) {
+          made = std::move(swapped);
+        }
+      }
+    }
+  }
+  BRepAlgoAPI_Fuse &fuse = *made;
   const TopoDS_Shape fused = fuse.Shape();
   // Which input each face of the fused shape came from (1: a, 2: b, 3: both).
   TopTools_DataMapOfShapeInteger owner;
