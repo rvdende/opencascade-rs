@@ -1638,6 +1638,7 @@ inline std::unique_ptr<TopoDS_Shape> cadrs_split_h(const TopoDS_Shape &shape, co
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <ShapeAnalysis_FreeBounds.hxx>
+#include <ShapeCustom.hxx>
 #include <TopTools_HSequenceOfShape.hxx>
 #include <gp_Trsf.hxx>
 
@@ -1659,7 +1660,20 @@ inline std::unique_ptr<TopoDS_Shape> cadrs_transform_h(const TopoDS_Shape &shape
   }
   const TopoDS_Shape result = make.Shape();
   cadrs_history(make, {&shape}, result, nullptr, nullptr, hist);
-  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
+  if (!trsf.IsNegative()) {
+    return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
+  }
+  // A reflection leaves left-handed (indirect) surfaces, which booleans and face merging get
+  // wrong; `ShapeCustom::DirectFaces` makes them direct (reversing their p-curves). It rebuilds
+  // the shape in the same order, so the history's face indices still hold.
+  const TopoDS_Shape direct = ShapeCustom::DirectFaces(result);
+  TopTools_IndexedMapOfShape before_faces, after_faces;
+  TopExp::MapShapes(result, TopAbs_FACE, before_faces);
+  TopExp::MapShapes(direct, TopAbs_FACE, after_faces);
+  if (before_faces.Extent() != after_faces.Extent()) {
+    throw std::runtime_error("the mirrored faces could not be made direct");
+  }
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(direct));
 }
 
 /// The solid bounded by the faces `faces` of `shape` (indices from 0) and a flat cap across each
