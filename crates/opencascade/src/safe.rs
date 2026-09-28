@@ -737,3 +737,180 @@ pub struct EdgeNormals {
     pub point: DVec3,
     pub normals: [DVec3; 2],
 }
+
+// ---------------------------------------------------------------------------------------------
+// Sweeps, lofts, splits and offset curves (cadrs P3.7)
+
+/// How a sweep's profile turns as it follows the path.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SweepMode {
+    /// Corrected Frenet: the profile keeps its angle to the path (no twist).
+    CorrectedFrenet,
+    /// The profile keeps its orientation in space.
+    Fixed,
+    /// The Frenet frame of the path.
+    Frenet,
+    /// The profile's plane keeps containing this direction (only [`Wire::try_pipe_shell_h`]).
+    Binormal(DVec3),
+}
+
+/// The derivative across the sections at one end of [`Shape::try_loft_solid`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LoftDerivative {
+    /// None: the loft is free there (its second derivative is zero).
+    Free,
+    /// The same vector at every point of the section.
+    Vector(DVec3),
+    /// In the plane with this normal, away from `center` (towards it for a negative
+    /// `length`), `length` long.
+    Radial { normal: DVec3, center: DVec3, length: f64 },
+}
+
+impl LoftDerivative {
+    fn spec(&self) -> [f64; 8] {
+        match *self {
+            LoftDerivative::Free => [0.0; 8],
+            LoftDerivative::Vector(v) => [1.0, v.x, v.y, v.z, 0.0, 0.0, 0.0, 0.0],
+            LoftDerivative::Radial { normal: n, center: c, length } => [2.0, n.x, n.y, n.z, c.x, c.y, c.z, length],
+        }
+    }
+}
+
+impl Edge {
+    /// The curve `offset` from an ellipse (about `normal`, major axis along `x_dir`,
+    /// `major >= minor`; positive offsets lie outside it), as a B-spline within 1e-8 of OCCT's
+    /// exact offset curve. `ends` limits it to the arc from the first point counter-clockwise
+    /// to the second (points on the offset curve).
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_offset_ellipse(
+        center: DVec3,
+        normal: DVec3,
+        x_dir: DVec3,
+        major: f64,
+        minor: f64,
+        offset: f64,
+        ends: Option<(DVec3, DVec3)>,
+    ) -> Result<Self, Error> {
+        let (c, n, x) = (center, normal, x_dir);
+        let (full, (a, b)) = match ends {
+            Some(e) => (false, e),
+            None => (true, (DVec3::ZERO, DVec3::ZERO)),
+        };
+        let inner = ffi::cadrs_safe::cadrs_edge_offset_ellipse(
+            c.x, c.y, c.z, n.x, n.y, n.z, x.x, x.y, x.z, major, minor, offset, full, a.x, a.y, a.z, b.x, b.y, b.z,
+        )
+        .map_err(occt)?;
+        Ok(Self { inner })
+    }
+
+    /// The edge split where it passes nearest `point`: the piece before and the piece after
+    /// (along its curve). A whole circle gives one edge starting at the point; a point at an
+    /// end gives the edge itself.
+    pub fn try_split_at(&self, point: DVec3) -> Result<Vec<Edge>, Error> {
+        let s = shape(ffi::cadrs_safe::cadrs_edge_split(&self.inner, point.x, point.y, point.z).map_err(occt)?)?;
+        Ok(s.edges().collect())
+    }
+
+    /// The same edge run the other way (its start and end swapped).
+    pub fn try_reversed(&self) -> Result<Edge, Error> {
+        let inner = ffi::cadrs_safe::cadrs_edge_reversed(&self.inner).map_err(occt)?;
+        Ok(Self { inner })
+    }
+}
+
+impl Wire {
+    /// Sweeps `profile` (a face gives a solid, a wire a shell) along this wire
+    /// (`BRepOffsetAPI_MakePipe`), with history (the faces each profile edge made; the start
+    /// and end faces). [`SweepMode::Binormal`] is not available here.
+    pub fn try_pipe_h(&self, profile: &Shape, mode: SweepMode) -> Result<(Shape, History), Error> {
+        let m = match mode {
+            SweepMode::CorrectedFrenet => 0,
+            SweepMode::Fixed => 1,
+            SweepMode::Frenet => 2,
+            SweepMode::Binormal(_) => return Err(Error::Occt("a fixed binormal needs a pipe shell".into())),
+        };
+        with_history(|h| ffi::cadrs_safe::cadrs_pipe_h(&self.inner, &profile.inner, m, h))
+    }
+
+    /// Sweeps the wire `profile` along this wire with `BRepOffsetAPI_MakePipeShell`, with
+    /// history; `solid` closes a closed profile's ends. [`SweepMode::Fixed`] is not available
+    /// here.
+    pub fn try_pipe_shell_h(&self, profile: &Wire, mode: SweepMode, solid: bool) -> Result<(Shape, History), Error> {
+        let (m, b) = match mode {
+            SweepMode::CorrectedFrenet => (0, DVec3::Z),
+            SweepMode::Frenet => (2, DVec3::Z),
+            SweepMode::Binormal(b) => (4, b),
+            SweepMode::Fixed => return Err(Error::Occt("a fixed trihedron needs a pipe".into())),
+        };
+        with_history(|h| ffi::cadrs_safe::cadrs_pipe_shell_h(&self.inner, &profile.inner, m, b.x, b.y, b.z, solid, h))
+    }
+}
+
+impl Shape {
+    /// A vertex at `point`.
+    pub fn try_vertex(point: DVec3) -> Result<Shape, Error> {
+        shape(ffi::cadrs_safe::cadrs_vertex(point.x, point.y, point.z).map_err(occt)?)
+    }
+
+    /// `n + 1` points evenly spaced by length along edge `index` (MapShapes order), in the
+    /// direction of the edge's curve.
+    pub fn edge_samples(&self, index: usize, n: usize) -> Result<Vec<DVec3>, Error> {
+        let mut v = ffi::cadrs_safe::cadrs_new_f64_vec();
+        ffi::cadrs_safe::cadrs_edge_samples(&self.inner, index as i32, n as i32, v.pin_mut()).map_err(occt)?;
+        Ok(triples(&v))
+    }
+
+    /// A loft through `sections` (wires; a vertex may be the first or last) with
+    /// `BRepOffsetAPI_ThruSections`, with history (inputs: the sections in order).
+    pub fn try_thru_sections_h(
+        sections: &[Shape],
+        solid: bool,
+        ruled: bool,
+        smoothing: bool,
+        max_degree: i32,
+    ) -> Result<(Shape, History), Error> {
+        let list = shape_list(sections.iter().map(|s| &*s.inner));
+        with_history(|h| ffi::cadrs_safe::cadrs_thru_sections_h(&list, solid, ruled, smoothing, max_degree, h))
+    }
+
+    /// A loft from sample points with end derivatives (see `cadrs_loft_solid` in the header):
+    /// `points[p][i]` holds patch p's `n` samples along section i. One B-spline face per patch;
+    /// `solid` adds planar end caps and makes a solid, else the result is a shell.
+    pub fn try_loft_solid(
+        points: &[Vec<Vec<DVec3>>],
+        periodic: bool,
+        vparams: &[f64],
+        start: LoftDerivative,
+        end: LoftDerivative,
+        solid: bool,
+    ) -> Result<Shape, Error> {
+        let patches = points.len();
+        let k = points.first().map_or(0, Vec::len);
+        let n = points.first().and_then(|p| p.first()).map_or(0, Vec::len);
+        if points.iter().any(|p| p.len() != k || p.iter().any(|s| s.len() != n)) {
+            return Err(Error::Occt("loft samples of different sizes".into()));
+        }
+        let flat: Vec<f64> = points.iter().flatten().flatten().flat_map(|p| [p.x, p.y, p.z]).collect();
+        shape(
+            ffi::cadrs_safe::cadrs_loft_solid(
+                &flat,
+                patches as i32,
+                k as i32,
+                n as i32,
+                periodic,
+                vparams,
+                &start.spec(),
+                &end.spec(),
+                solid,
+            )
+            .map_err(occt)?,
+        )
+    }
+
+    /// Splits the shape by `tools` (faces or shells; `BRepAlgoAPI_Splitter`), with history
+    /// (inputs: this shape, then the tools).
+    pub fn try_split_h(&self, tools: &[Shape]) -> Result<(Shape, History), Error> {
+        let list = shape_list(tools.iter().map(|s| &*s.inner));
+        with_history(|h| ffi::cadrs_safe::cadrs_split_h(&self.inner, &list, h))
+    }
+}

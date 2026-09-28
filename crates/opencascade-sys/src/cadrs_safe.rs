@@ -263,5 +263,80 @@ mod inner {
             out: Pin<&mut CxxVector<f64>>,
         ) -> Result<()>;
         pub fn cadrs_is_valid(shape: &TopoDS_Shape) -> Result<bool>;
+
+        // Sweeps, lofts, splits and offset curves (cadrs P3.7)
+        #[allow(clippy::too_many_arguments)]
+        pub fn cadrs_edge_offset_ellipse(
+            cx: f64,
+            cy: f64,
+            cz: f64,
+            nx: f64,
+            ny: f64,
+            nz: f64,
+            xx: f64,
+            xy: f64,
+            xz: f64,
+            major: f64,
+            minor: f64,
+            offset: f64,
+            full: bool,
+            ax: f64,
+            ay: f64,
+            az: f64,
+            bx: f64,
+            by: f64,
+            bz: f64,
+        ) -> Result<UniquePtr<TopoDS_Edge>>;
+        pub fn cadrs_edge_split(edge: &TopoDS_Edge, px: f64, py: f64, pz: f64) -> Result<UniquePtr<TopoDS_Shape>>;
+        pub fn cadrs_edge_reversed(edge: &TopoDS_Edge) -> Result<UniquePtr<TopoDS_Edge>>;
+        pub fn cadrs_edge_samples(
+            shape: &TopoDS_Shape,
+            index: i32,
+            n: i32,
+            out: Pin<&mut CxxVector<f64>>,
+        ) -> Result<()>;
+        pub fn cadrs_vertex(x: f64, y: f64, z: f64) -> Result<UniquePtr<TopoDS_Shape>>;
+        pub fn cadrs_pipe_h(
+            spine: &TopoDS_Wire,
+            profile: &TopoDS_Shape,
+            mode: i32,
+            hist: Pin<&mut CxxVector<i32>>,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
+        #[allow(clippy::too_many_arguments)]
+        pub fn cadrs_pipe_shell_h(
+            spine: &TopoDS_Wire,
+            profile: &TopoDS_Wire,
+            mode: i32,
+            bx: f64,
+            by: f64,
+            bz: f64,
+            solid: bool,
+            hist: Pin<&mut CxxVector<i32>>,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
+        pub fn cadrs_thru_sections_h(
+            sections: &TopTools_ListOfShape,
+            solid: bool,
+            ruled: bool,
+            smoothing: bool,
+            max_degree: i32,
+            hist: Pin<&mut CxxVector<i32>>,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
+        #[allow(clippy::too_many_arguments)]
+        pub fn cadrs_loft_solid(
+            points: &[f64],
+            patches: i32,
+            k: i32,
+            n: i32,
+            periodic: bool,
+            vparams: &[f64],
+            start: &[f64],
+            end: &[f64],
+            solid: bool,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
+        pub fn cadrs_split_h(
+            shape: &TopoDS_Shape,
+            tools: &TopTools_ListOfShape,
+            hist: Pin<&mut CxxVector<i32>>,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
     }
 }

@@ -1183,3 +1183,451 @@ inline bool cadrs_is_valid(const TopoDS_Shape &shape) {
   BRepCheck_Analyzer check(shape);
   return check.IsValid();
 }
+
+// ---------------------------------------------------------------------------------------------
+// Sweeps, lofts, splits and offset curves (cadrs P3.7)
+
+#include <BRepAlgoAPI_Splitter.hxx>
+#include <BRepBuilderAPI_MakeSolid.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepBuilderAPI_Sewing.hxx>
+#include <BRepLib.hxx>
+#include <BRepOffsetAPI_MakePipe.hxx>
+#include <BRepOffsetAPI_MakePipeShell.hxx>
+#include <BRepOffsetAPI_ThruSections.hxx>
+#include <GCPnts_UniformAbscissa.hxx>
+#include <GeomAPI_Interpolate.hxx>
+#include <GeomAPI_ProjectPointOnCurve.hxx>
+#include <GeomConvert_ApproxCurve.hxx>
+#include <GeomFill_Trihedron.hxx>
+#include <Precision.hxx>
+#include <Geom_BSplineCurve.hxx>
+#include <Geom_BSplineSurface.hxx>
+#include <Geom_Ellipse.hxx>
+#include <Geom_OffsetCurve.hxx>
+#include <TColStd_Array1OfInteger.hxx>
+#include <TColStd_HArray1OfBoolean.hxx>
+#include <TColStd_HArray1OfReal.hxx>
+#include <TColgp_Array1OfVec.hxx>
+#include <TColgp_Array2OfPnt.hxx>
+#include <TColgp_HArray1OfPnt.hxx>
+#include <TopoDS_Shell.hxx>
+#include <TopoDS_Solid.hxx>
+
+/// A curve at a constant distance `offset` from an ellipse (about `normal`, major axis along
+/// `x_dir`, `major` >= `minor`): positive offsets lie outside it. OCCT's exact offset curve,
+/// approximated by a C2 B-spline within 1e-8 mm (offset curves are fragile in booleans). The
+/// whole curve if `full`, else the arc from the point `p1` to `p2` of the offset curve,
+/// counter-clockwise seen from `normal` (the points become the edge's vertices).
+inline std::unique_ptr<TopoDS_Edge> cadrs_edge_offset_ellipse(double cx, double cy, double cz, double nx,
+                                                             double ny, double nz, double xx, double xy, double xz,
+                                                             double major, double minor, double offset, bool full,
+                                                             double ax, double ay, double az, double bx, double by,
+                                                             double bz) {
+  const gp_Dir n(nx, ny, nz);
+  Handle(Geom_Ellipse) base = new Geom_Ellipse(gp_Elips(gp_Ax2(gp_Pnt(cx, cy, cz), n, gp_Dir(xx, xy, xz)), major, minor));
+  if (offset < -minor * minor / major + 1e-9) {
+    throw std::runtime_error("the offset is larger than the ellipse's smallest radius of curvature");
+  }
+  Handle(Geom_Curve) basis = base;
+  if (!full) {
+    Handle(Geom_OffsetCurve) whole = new Geom_OffsetCurve(base, offset, n);
+    GeomAPI_ProjectPointOnCurve pa(gp_Pnt(ax, ay, az), whole);
+    GeomAPI_ProjectPointOnCurve pb(gp_Pnt(bx, by, bz), whole);
+    if (pa.NbPoints() == 0 || pb.NbPoints() == 0) {
+      throw std::runtime_error("the arc's ends are not on the offset ellipse");
+    }
+    double u0 = pa.LowerDistanceParameter();
+    double u1 = pb.LowerDistanceParameter();
+    while (u1 <= u0 + 1e-12) {
+      u1 += 2.0 * 3.14159265358979323846;
+    }
+    basis = new Geom_TrimmedCurve(base, u0, u1);
+  }
+  Handle(Geom_OffsetCurve) curve = new Geom_OffsetCurve(basis, offset, n);
+  GeomConvert_ApproxCurve approx(curve, 1e-8, GeomAbs_C2, 400, 9);
+  if (!approx.HasResult()) {
+    throw std::runtime_error("the offset ellipse could not be approximated");
+  }
+  Handle(Geom_BSplineCurve) bs = approx.Curve();
+  if (full) {
+    BRepBuilderAPI_MakeEdge make(bs);
+    return cadrs_edge_from(make);
+  }
+  BRepBuilderAPI_MakeEdge make(bs, gp_Pnt(ax, ay, az), gp_Pnt(bx, by, bz));
+  return cadrs_edge_from(make);
+}
+
+/// The edge split at the point of it nearest `p`: a compound of the piece before the point and
+/// the piece after it (along the curve's parameter). A closed periodic edge (a whole circle)
+/// gives one edge that starts and ends at the point. A point at an end gives the edge itself.
+inline std::unique_ptr<TopoDS_Shape> cadrs_edge_split(const TopoDS_Edge &edge, double px, double py, double pz) {
+  double f = 0.0, l = 0.0;
+  Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, f, l);
+  if (curve.IsNull()) {
+    throw std::runtime_error("the edge has no 3D curve");
+  }
+  GeomAPI_ProjectPointOnCurve proj(gp_Pnt(px, py, pz), curve, f, l);
+  if (proj.NbPoints() == 0) {
+    throw std::runtime_error("the point does not project onto the edge");
+  }
+  const double u = proj.LowerDistanceParameter();
+  BRep_Builder b;
+  TopoDS_Compound out;
+  b.MakeCompound(out);
+  const double span = l - f;
+  const bool closed = curve->Value(f).Distance(curve->Value(l)) < Precision::Confusion();
+  if (closed && curve->IsPeriodic()) {
+    BRepBuilderAPI_MakeEdge make(curve, u, u + curve->Period());
+    b.Add(out, *cadrs_edge_from(make));
+  } else if (u - f < 1e-9 * span || l - u < 1e-9 * span) {
+    b.Add(out, edge);
+  } else {
+    BRepBuilderAPI_MakeEdge first(curve, f, u);
+    BRepBuilderAPI_MakeEdge second(curve, u, l);
+    b.Add(out, *cadrs_edge_from(first));
+    b.Add(out, *cadrs_edge_from(second));
+  }
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(out));
+}
+
+/// The same edge run the other way.
+inline std::unique_ptr<TopoDS_Edge> cadrs_edge_reversed(const TopoDS_Edge &edge) {
+  return std::unique_ptr<TopoDS_Edge>(new TopoDS_Edge(TopoDS::Edge(edge.Reversed())));
+}
+
+/// `n + 1` points evenly spaced by length along edge `index` (MapShapes order) of `shape`, in
+/// the direction of the edge's curve parameter.
+inline void cadrs_edge_samples(const TopoDS_Shape &shape, int32_t index, int32_t n, std::vector<double> &out) {
+  TopTools_IndexedMapOfShape edges;
+  TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+  if (index < 0 || index >= edges.Extent() || n < 1) {
+    throw std::runtime_error("no such edge");
+  }
+  BRepAdaptor_Curve curve(TopoDS::Edge(edges(index + 1)));
+  GCPnts_UniformAbscissa sampler(curve, n + 1, curve.FirstParameter(), curve.LastParameter());
+  if (!sampler.IsDone()) {
+    throw std::runtime_error("sampling the edge failed");
+  }
+  for (Standard_Integer i = 1; i <= sampler.NbPoints(); ++i) {
+    gp_Pnt p = curve.Value(sampler.Parameter(i));
+    out.push_back(p.X());
+    out.push_back(p.Y());
+    out.push_back(p.Z());
+  }
+}
+
+/// A vertex at a point (a loft's point section).
+inline std::unique_ptr<TopoDS_Shape> cadrs_vertex(double x, double y, double z) {
+  BRepBuilderAPI_MakeVertex make(gp_Pnt(x, y, z));
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(make.Shape()));
+}
+
+/// Sweeps `profile` (a face, a wire, ...) along `spine` (`BRepOffsetAPI_MakePipe`), with
+/// history. `mode`: 0 corrected Frenet (the profile keeps its angle to the path), 1 fixed (the
+/// profile keeps its orientation in space), 2 Frenet, 3 discrete trihedron.
+inline std::unique_ptr<TopoDS_Shape> cadrs_pipe_h(const TopoDS_Wire &spine, const TopoDS_Shape &profile, int32_t mode,
+                                                 std::vector<int32_t> &hist) {
+  GeomFill_Trihedron tri = GeomFill_IsCorrectedFrenet;
+  switch (mode) {
+  case 1:
+    tri = GeomFill_IsFixed;
+    break;
+  case 2:
+    tri = GeomFill_IsFrenet;
+    break;
+  case 3:
+    tri = GeomFill_IsDiscreteTrihedron;
+    break;
+  default:
+    break;
+  }
+  BRepOffsetAPI_MakePipe make(spine, profile, tri, Standard_False);
+  make.Build();
+  if (!make.IsDone()) {
+    throw std::runtime_error("sweep failed");
+  }
+  const TopoDS_Shape result = make.Shape();
+  const TopoDS_Shape first = make.FirstShape();
+  const TopoDS_Shape last = make.LastShape();
+  cadrs_history(make, {&profile}, result, &first, &last, hist);
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
+}
+
+/// Sweeps the wire `profile` along `spine` with `BRepOffsetAPI_MakePipeShell`, with history.
+/// `mode`: 0 corrected Frenet, 2 Frenet, 3 discrete trihedron, 4 a fixed binormal direction
+/// (`bx`, `by`, `bz`: the profile's plane keeps containing it). `solid` closes the ends of a
+/// closed profile.
+inline std::unique_ptr<TopoDS_Shape> cadrs_pipe_shell_h(const TopoDS_Wire &spine, const TopoDS_Wire &profile,
+                                                       int32_t mode, double bx, double by, double bz, bool solid,
+                                                       std::vector<int32_t> &hist) {
+  BRepOffsetAPI_MakePipeShell make(spine);
+  switch (mode) {
+  case 2:
+    make.SetMode(Standard_True);
+    break;
+  case 3:
+    make.SetDiscreteMode();
+    break;
+  case 4:
+    make.SetMode(gp_Dir(bx, by, bz));
+    break;
+  default:
+    make.SetMode(Standard_False);
+    break;
+  }
+  make.Add(profile, Standard_False, Standard_False);
+  make.Build();
+  if (!make.IsDone()) {
+    throw std::runtime_error("sweep failed");
+  }
+  if (solid && !make.MakeSolid()) {
+    throw std::runtime_error("the sweep could not be closed into a solid");
+  }
+  const TopoDS_Shape result = make.Shape();
+  const TopoDS_Shape first = make.FirstShape();
+  const TopoDS_Shape last = make.LastShape();
+  cadrs_history(make, {&profile}, result, &first, &last, hist);
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
+}
+
+/// A loft through `sections` (wires, and vertices at the ends) with
+/// `BRepOffsetAPI_ThruSections`, with history (each section edge's generated faces; the first
+/// and last section's faces). `ruled` joins neighbouring sections with ruled surfaces;
+/// `max_degree` > 0 limits the degree of the loft surface across the sections.
+inline std::unique_ptr<TopoDS_Shape> cadrs_thru_sections_h(const TopTools_ListOfShape &sections, bool solid, bool ruled,
+                                                          bool smoothing, int32_t max_degree,
+                                                          std::vector<int32_t> &hist) {
+  BRepOffsetAPI_ThruSections make(solid, ruled, 1e-6);
+  make.CheckCompatibility(Standard_True);
+  make.SetSmoothing(smoothing);
+  if (max_degree > 0) {
+    make.SetMaxDegree(max_degree);
+  }
+  std::vector<TopoDS_Shape> inputs;
+  for (TopTools_ListOfShape::Iterator it(sections); it.More(); it.Next()) {
+    inputs.push_back(it.Value());
+  }
+  for (const TopoDS_Shape &s : inputs) {
+    if (s.ShapeType() == TopAbs_VERTEX) {
+      make.AddVertex(TopoDS::Vertex(s));
+    } else if (s.ShapeType() == TopAbs_WIRE) {
+      make.AddWire(TopoDS::Wire(s));
+    } else {
+      throw std::runtime_error("a loft section must be a wire or a vertex");
+    }
+  }
+  make.Build();
+  if (!make.IsDone()) {
+    throw std::runtime_error("loft failed");
+  }
+  const TopoDS_Shape result = make.Shape();
+  const TopoDS_Shape first = make.FirstShape();
+  const TopoDS_Shape last = make.LastShape();
+  std::vector<const TopoDS_Shape *> ptrs;
+  for (const TopoDS_Shape &s : inputs) {
+    ptrs.push_back(&s);
+  }
+  cadrs_history(make, ptrs, result, &first, &last, hist);
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
+}
+
+/// The derivative across the sections at one end of a loft ([`cadrs_loft_solid`]): `spec` is
+/// `[mode, x, y, z, cx, cy, cz, scale]`. Mode 0: none (the loft's curvature is zero there);
+/// 1: the vector (x, y, z) at every point; 2: in the plane with normal (x, y, z), away from the
+/// point c (or towards it for a negative scale), `scale` long.
+static bool cadrs_loft_derivative(rust::Slice<const double> spec, const gp_Pnt &pole, gp_Vec &out) {
+  if (spec.size() < 8 || spec[0] < 0.5) {
+    return false;
+  }
+  if (spec[0] < 1.5) {
+    out = gp_Vec(spec[1], spec[2], spec[3]);
+    return true;
+  }
+  const gp_Vec n(spec[1], spec[2], spec[3]);
+  gp_Vec r(gp_Pnt(spec[4], spec[5], spec[6]), pole);
+  r -= n * (r.Dot(n) / n.SquareMagnitude());
+  if (r.Magnitude() < 1e-12) {
+    out = gp_Vec(0, 0, 0);
+  } else {
+    out = r.Normalized() * spec[7];
+  }
+  return true;
+}
+
+/// A loft built from sample points (cadrs P3.7: lofts with start and end conditions, which
+/// `BRepOffsetAPI_ThruSections` has no way to take). `points` holds `patches` × `k` sections ×
+/// `n` points (x, y, z): patch p's samples along its piece of section i. Each section piece is
+/// interpolated by a cubic B-spline through its samples (all with the same parameters, so they
+/// share one knot vector; `periodic` for a single closed smooth piece, whose `n` samples then
+/// don't repeat the first), and each column of poles by a cubic B-spline through the `k`
+/// sections at `vparams`, with the derivatives `start` and `end` (see
+/// [`cadrs_loft_derivative`]) at the first and last section. One face per patch; `solid` adds
+/// planar caps from the first and last section and sews everything into a solid, else the faces
+/// are sewn into a shell.
+inline std::unique_ptr<TopoDS_Shape> cadrs_loft_solid(rust::Slice<const double> points, int32_t patches, int32_t k,
+                                                     int32_t n, bool periodic, rust::Slice<const double> vparams,
+                                                     rust::Slice<const double> start,
+                                                     rust::Slice<const double> end, bool solid) {
+  if (patches < 1 || k < 2 || n < 2 || (int)vparams.size() != k ||
+      (int)points.size() != patches * k * n * 3 || (periodic && patches != 1)) {
+    throw std::runtime_error("bad loft samples");
+  }
+  BRepBuilderAPI_Sewing sew(1e-6);
+  std::vector<TopoDS_Edge> first_edges, last_edges;
+  for (int p = 0; p < patches; ++p) {
+    // Along each section.
+    const int m = periodic ? n + 1 : n;
+    Handle(TColStd_HArray1OfReal) uparams = new TColStd_HArray1OfReal(1, m);
+    for (int j = 0; j < m; ++j) {
+      uparams->SetValue(j + 1, (double)j / (double)(periodic ? n : n - 1));
+    }
+    std::vector<Handle(Geom_BSplineCurve)> sections;
+    for (int i = 0; i < k; ++i) {
+      Handle(TColgp_HArray1OfPnt) pts = new TColgp_HArray1OfPnt(1, n);
+      for (int j = 0; j < n; ++j) {
+        const size_t o = (((size_t)p * k + i) * n + j) * 3;
+        pts->SetValue(j + 1, gp_Pnt(points[o], points[o + 1], points[o + 2]));
+      }
+      GeomAPI_Interpolate interp(pts, uparams, periodic, 1e-12);
+      interp.Perform();
+      if (!interp.IsDone()) {
+        throw std::runtime_error("a loft section could not be interpolated");
+      }
+      sections.push_back(interp.Curve());
+    }
+    const Handle(Geom_BSplineCurve) &c0 = sections[0];
+    const int nu = c0->NbPoles();
+    for (const Handle(Geom_BSplineCurve) &c : sections) {
+      if (c->NbPoles() != nu || c->Degree() != c0->Degree()) {
+        throw std::runtime_error("loft sections are not compatible");
+      }
+    }
+    // Across the sections, one pole column at a time.
+    Handle(TColStd_HArray1OfReal) vp = new TColStd_HArray1OfReal(1, k);
+    for (int i = 0; i < k; ++i) {
+      vp->SetValue(i + 1, vparams[i]);
+    }
+    std::vector<Handle(Geom_BSplineCurve)> columns;
+    for (int j = 1; j <= nu; ++j) {
+      Handle(TColgp_HArray1OfPnt) col = new TColgp_HArray1OfPnt(1, k);
+      for (int i = 0; i < k; ++i) {
+        col->SetValue(i + 1, sections[i]->Pole(j));
+      }
+      GeomAPI_Interpolate interp(col, vp, Standard_False, 1e-12);
+      gp_Vec d0, d1;
+      const bool has0 = cadrs_loft_derivative(start, col->Value(1), d0);
+      const bool has1 = cadrs_loft_derivative(end, col->Value(k), d1);
+      if (has0 || has1) {
+        TColgp_Array1OfVec tangents(1, k);
+        Handle(TColStd_HArray1OfBoolean) flags = new TColStd_HArray1OfBoolean(1, k);
+        for (int i = 1; i <= k; ++i) {
+          tangents.SetValue(i, gp_Vec(0, 0, 0));
+          flags->SetValue(i, Standard_False);
+        }
+        if (has0) {
+          tangents.SetValue(1, d0);
+          flags->SetValue(1, Standard_True);
+        }
+        if (has1) {
+          tangents.SetValue(k, d1);
+          flags->SetValue(k, Standard_True);
+        }
+        interp.Load(tangents, flags, Standard_False);
+      }
+      interp.Perform();
+      if (!interp.IsDone()) {
+        throw std::runtime_error("the loft could not be interpolated across its sections");
+      }
+      columns.push_back(interp.Curve());
+    }
+    const Handle(Geom_BSplineCurve) &v0 = columns[0];
+    const int nv = v0->NbPoles();
+    TColgp_Array2OfPnt poles(1, nu, 1, nv);
+    for (int j = 1; j <= nu; ++j) {
+      if (columns[j - 1]->NbPoles() != nv) {
+        throw std::runtime_error("loft columns are not compatible");
+      }
+      for (int i = 1; i <= nv; ++i) {
+        poles.SetValue(j, i, columns[j - 1]->Pole(i));
+      }
+    }
+    TColStd_Array1OfReal uk(1, c0->NbKnots()), vk(1, v0->NbKnots());
+    TColStd_Array1OfInteger um(1, c0->NbKnots()), vm(1, v0->NbKnots());
+    c0->Knots(uk);
+    c0->Multiplicities(um);
+    v0->Knots(vk);
+    v0->Multiplicities(vm);
+    Handle(Geom_BSplineSurface) surface = new Geom_BSplineSurface(poles, uk, vk, um, vm, c0->Degree(), v0->Degree(),
+                                                                  c0->IsPeriodic(), Standard_False);
+    BRepBuilderAPI_MakeFace face(surface, 1e-7);
+    if (!face.IsDone()) {
+      throw std::runtime_error("the loft face could not be built");
+    }
+    sew.Add(face.Face());
+    if (solid) {
+      BRepBuilderAPI_MakeEdge e0(sections.front());
+      BRepBuilderAPI_MakeEdge e1(sections.back());
+      first_edges.push_back(*cadrs_edge_from(e0));
+      last_edges.push_back(*cadrs_edge_from(e1));
+    }
+  }
+  if (solid) {
+    for (const std::vector<TopoDS_Edge> *edges : {&first_edges, &last_edges}) {
+      BRepBuilderAPI_MakeWire wire;
+      for (const TopoDS_Edge &e : *edges) {
+        wire.Add(e);
+      }
+      if (!wire.IsDone()) {
+        throw std::runtime_error("a loft end is not a closed loop");
+      }
+      BRepBuilderAPI_MakeFace cap(wire.Wire(), Standard_True);
+      if (!cap.IsDone()) {
+        throw std::runtime_error("a loft end is not planar");
+      }
+      sew.Add(cap.Face());
+    }
+  }
+  sew.Perform();
+  TopoDS_Shape sewn = sew.SewedShape();
+  if (!solid) {
+    return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(sewn));
+  }
+  TopExp_Explorer shells(sewn, TopAbs_SHELL);
+  if (!shells.More()) {
+    throw std::runtime_error("the loft's faces do not close up");
+  }
+  BRepBuilderAPI_MakeSolid make(TopoDS::Shell(shells.Current()));
+  if (!make.IsDone()) {
+    throw std::runtime_error("the loft could not be made solid");
+  }
+  TopoDS_Solid result = make.Solid();
+  BRepLib::OrientClosedSolid(result);
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
+}
+
+/// Splits `shape` by `tools` (faces, shells, ...; `BRepAlgoAPI_Splitter`): the pieces share
+/// the faces the tools made. History inputs: `shape`, then each tool.
+inline std::unique_ptr<TopoDS_Shape> cadrs_split_h(const TopoDS_Shape &shape, const TopTools_ListOfShape &tools,
+                                                  std::vector<int32_t> &hist) {
+  BRepAlgoAPI_Splitter split;
+  TopTools_ListOfShape args;
+  args.Append(shape);
+  split.SetArguments(args);
+  split.SetTools(tools);
+  split.Build();
+  if (!split.IsDone() || split.HasErrors()) {
+    throw std::runtime_error("split failed");
+  }
+  const TopoDS_Shape result = split.Shape();
+  std::vector<TopoDS_Shape> keep;
+  for (TopTools_ListOfShape::Iterator it(tools); it.More(); it.Next()) {
+    keep.push_back(it.Value());
+  }
+  std::vector<const TopoDS_Shape *> inputs{&shape};
+  for (const TopoDS_Shape &t : keep) {
+    inputs.push_back(&t);
+  }
+  cadrs_history(split, inputs, result, nullptr, nullptr, hist);
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
+}
