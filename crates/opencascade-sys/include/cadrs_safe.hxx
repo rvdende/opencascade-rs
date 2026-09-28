@@ -894,24 +894,9 @@ inline std::unique_ptr<TopoDS_Shape> cadrs_fuse_clean_h(const TopoDS_Shape &a, c
   if (!made->IsDone() || made->HasErrors()) {
     throw std::runtime_error("boolean operation failed");
   }
-  // P3.8: OCCT can get a union wrong one way round and right the other (a half cylinder and
-  // its mirror image across their flat side): a union smaller than either input or larger than
-  // both together is tried again with the inputs swapped.
-  {
-    const double va = cadrs_volume_of(a), vb = cadrs_volume_of(b), vf = cadrs_volume_of(made->Shape());
-    const double tol = 1e-7 * std::max(1.0, std::abs(va) + std::abs(vb));
-    if (vf < std::max(va, vb) - tol || vf > va + vb + tol) {
-      std::unique_ptr<BRepAlgoAPI_Fuse> swapped(new BRepAlgoAPI_Fuse(b, a));
-      if (swapped->IsDone() && !swapped->HasErrors()) {
-        const double vs = cadrs_volume_of(swapped->Shape());
-        if (vs >= std::max(va, vb) - tol && vs <= va + vb + tol) {
-          made = std::move(swapped);
-        }
-      }
-    }
-  }
   BRepAlgoAPI_Fuse &fuse = *made;
   const TopoDS_Shape fused = fuse.Shape();
+  const double fused_volume = cadrs_volume_of(fused);
   // Which input each face of the fused shape came from (1: a, 2: b, 3: both).
   TopTools_DataMapOfShapeInteger owner;
   const TopoDS_Shape *inputs[2] = {&a, &b};
@@ -956,16 +941,17 @@ inline std::unique_ptr<TopoDS_Shape> cadrs_fuse_clean_h(const TopoDS_Shape &a, c
   unify.Build();
   const TopoDS_Shape result = unify.Shape();
   // P3.8: merging faces can go wrong (two halves of a cylinder, one of them a mirror image
-  // whose parameters run the other way round, merge into a broken face). A merge that changes
-  // the volume is dropped: the fused shape is kept, seams and all.
-  GProp_GProps before_props, after_props;
-  BRepGProp::VolumeProperties(fused, before_props);
-  BRepGProp::VolumeProperties(result, after_props);
-  const double v0 = before_props.Mass();
-  const bool same = std::abs(after_props.Mass() - v0) <= 1e-7 * std::max(1.0, std::abs(v0));
-  if (!same) {
-    cadrs_history(fuse, {&a, &b}, fused, nullptr, nullptr, hist);
-    return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(fused));
+  // whose parameters run the other way round, merge into a face turned inside out), and
+  // UnifySameDomain edits the fused shape's edges in place on the way. A merge that changes the
+  // volume is dropped: the union is made again and kept as it is, seams and all.
+  if (std::abs(cadrs_volume_of(result) - fused_volume) > 1e-7 * std::max(1.0, std::abs(fused_volume))) {
+    BRepAlgoAPI_Fuse again(a, b);
+    if (!again.IsDone() || again.HasErrors()) {
+      throw std::runtime_error("boolean operation failed");
+    }
+    const TopoDS_Shape plain = again.Shape();
+    cadrs_history(again, {&a, &b}, plain, nullptr, nullptr, hist);
+    return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(plain));
   }
   cadrs_composed_history<BRepAlgoAPI_Fuse> composed{fuse, unify.History(), {}};
   cadrs_history(composed, {&a, &b}, result, nullptr, nullptr, hist);
