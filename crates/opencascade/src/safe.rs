@@ -65,6 +65,14 @@ impl Edge {
         Ok(Self { inner })
     }
 
+    /// A rational Bezier curve with a weight per pole (three poles make a conic: an ellipse arc
+    /// for a middle weight below 1, a parabola at 1, a hyperbola above).
+    pub fn try_bezier(poles: &[DVec3], weights: &[f64]) -> Result<Self, Error> {
+        let flat: Vec<f64> = poles.iter().flat_map(|p| [p.x, p.y, p.z]).collect();
+        let inner = ffi::cadrs_safe::cadrs_edge_bezier(&flat, weights).map_err(occt)?;
+        Ok(Self { inner })
+    }
+
     /// A circular arc through three points.
     pub fn try_arc(a: DVec3, b: DVec3, c: DVec3) -> Result<Self, Error> {
         let inner =

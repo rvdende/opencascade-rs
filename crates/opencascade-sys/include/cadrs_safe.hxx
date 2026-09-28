@@ -57,6 +57,9 @@ template <typename Try, typename Fail> static void trycatch(Try &&func, Fail &&f
 #include <GCPnts_TangentialDeflection.hxx>
 #include <GC_MakeArcOfCircle.hxx>
 #include <Geom_TrimmedCurve.hxx>
+#include <Geom_BezierCurve.hxx>
+#include <TColgp_Array1OfPnt.hxx>
+#include <TColStd_Array1OfReal.hxx>
 #include <Poly_Connect.hxx>
 #include <Poly_PolygonOnTriangulation.hxx>
 #include <Poly_Triangulation.hxx>
@@ -117,6 +120,25 @@ inline std::unique_ptr<TopoDS_Edge> cadrs_edge_arc3(double ax, double ay, double
     throw std::runtime_error("arc through three points failed (collinear points?)");
   }
   BRepBuilderAPI_MakeEdge make(arc.Value());
+  return cadrs_edge_from(make);
+}
+
+/// A (rational) Bezier curve through `poles` (x, y, z triples) with a weight per pole: with three
+/// poles, a conic (cadrs P3.6: conic and curvature fillet sections).
+inline std::unique_ptr<TopoDS_Edge> cadrs_edge_bezier(rust::Slice<const double> poles,
+                                                      rust::Slice<const double> weights) {
+  const int n = (int)weights.size();
+  if (n < 2 || (int)poles.size() != 3 * n) {
+    throw std::runtime_error("a Bezier curve needs at least two poles and a weight per pole");
+  }
+  TColgp_Array1OfPnt p(1, n);
+  TColStd_Array1OfReal w(1, n);
+  for (int i = 0; i < n; ++i) {
+    p.SetValue(i + 1, gp_Pnt(poles[3 * i], poles[3 * i + 1], poles[3 * i + 2]));
+    w.SetValue(i + 1, weights[i]);
+  }
+  Handle(Geom_BezierCurve) curve = new Geom_BezierCurve(p, w);
+  BRepBuilderAPI_MakeEdge make(curve);
   return cadrs_edge_from(make);
 }
 

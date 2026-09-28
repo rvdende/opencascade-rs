@@ -72,6 +72,7 @@ mod inner {
             by: f64,
             bz: f64,
         ) -> Result<UniquePtr<TopoDS_Edge>>;
+        pub fn cadrs_edge_bezier(poles: &[f64], weights: &[f64]) -> Result<UniquePtr<TopoDS_Edge>>;
         pub fn cadrs_edge_polyline(
             edge: &TopoDS_Edge,
             shape: &TopoDS_Shape,
