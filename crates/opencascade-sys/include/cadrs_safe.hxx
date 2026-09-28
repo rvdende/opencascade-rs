@@ -82,6 +82,8 @@ template <typename Try, typename Fail> static void trycatch(Try &&func, Fail &&f
 #include <TopoDS_Wire.hxx>
 #include <gp_Ax1.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
 #include <BRepLProp_SLProps.hxx>
 #include <Geom2d_Curve.hxx>
 #include <TColgp_Array1OfPnt2d.hxx>
@@ -930,6 +932,18 @@ inline std::unique_ptr<TopoDS_Shape> cadrs_fuse_clean_h(const TopoDS_Shape &a, c
   }
   unify.Build();
   const TopoDS_Shape result = unify.Shape();
+  // P3.8: merging faces can go wrong (two halves of a cylinder, one of them a mirror image
+  // whose parameters run the other way round, merge into a broken face). A merge that changes
+  // the volume is dropped: the fused shape is kept, seams and all.
+  GProp_GProps before_props, after_props;
+  BRepGProp::VolumeProperties(fused, before_props);
+  BRepGProp::VolumeProperties(result, after_props);
+  const double v0 = before_props.Mass();
+  const bool same = std::abs(after_props.Mass() - v0) <= 1e-7 * std::max(1.0, std::abs(v0));
+  if (!same) {
+    cadrs_history(fuse, {&a, &b}, fused, nullptr, nullptr, hist);
+    return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(fused));
+  }
   cadrs_composed_history<BRepAlgoAPI_Fuse> composed{fuse, unify.History(), {}};
   cadrs_history(composed, {&a, &b}, result, nullptr, nullptr, hist);
   return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
