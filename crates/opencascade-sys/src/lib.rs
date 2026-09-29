@@ -15,6 +15,7 @@ pub mod b_rep_tools;
 pub mod bin_tools;
 pub mod bnd;
 pub mod cadrs_safe;
+pub mod cadrs_xde;
 pub mod bop_algo;
 pub mod g_prop;
 pub mod gc;

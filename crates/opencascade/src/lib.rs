@@ -9,6 +9,7 @@ pub mod primitives;
 pub mod safe;
 pub mod section;
 pub mod workplane;
+pub mod xde;
 
 mod law_function;
 mod make_pipe_shell;

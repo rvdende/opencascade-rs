@@ -30,6 +30,11 @@ const OCCT_LIBS: &[&str] = &[
     "TKCAF",
     "TKLCAF",
     "TKXCAF",
+    // XDE (cadrs_xde): XCAF documents pull in these.
+    "TKVCAF",
+    "TKV3d",
+    "TKService",
+    "TKCDF",
 ];
 
 fn main() {
@@ -48,6 +53,9 @@ fn main() {
 
     if is_windows {
         println!("cargo:rustc-link-lib=dylib=user32");
+        // TKService (pulled in by XDE) uses these.
+        println!("cargo:rustc-link-lib=dylib=gdi32");
+        println!("cargo:rustc-link-lib=dylib=advapi32");
     }
 
     // TODO(bschwind) - Iterate over the src/ directory to populate this.
@@ -69,6 +77,7 @@ fn main() {
         "src/bin_tools.rs",
         "src/bnd.rs",
         "src/cadrs_safe.rs",
+        "src/cadrs_xde.rs",
         "src/bop_algo.rs",
         "src/geom.rs",
         "src/geom2d.rs",
