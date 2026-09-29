@@ -2231,3 +2231,118 @@ inline std::unique_ptr<TopoDS_Shape> cadrs_sew_solid(const TopTools_ListOfShape 
   BRepLib::OrientClosedSolid(result);
   return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
 }
+
+// ------------------------------------------------------------------------------------------
+// cadrs Final (PS14.6, smooth fillet corners): a face replaced by an N-sided filling.
+
+#include <BRepOffsetAPI_MakeFilling.hxx>
+#include <GeomAbs_Shape.hxx>
+
+/// The solid `shape` with its face `index` (explorer order) replaced by a filling surface
+/// (`BRepOffsetAPI_MakeFilling`) through that face's boundary edges, meeting each neighbouring
+/// face with continuity `order` (0 C0, 1 G1, 2 G2) along their shared edge, then sewn (within
+/// `tol`, or more if the filling's own boundary error is larger) into an outward solid.
+/// `hist` gets, for each face of the result in explorer order, the index of the face of
+/// `shape` it continues, or -1 for the filling. `errors` gets the filling's G0, G1 and G2
+/// errors (the largest distance, angle and curvature difference to its constraints).
+/// `params` (any may be left out, for the default): the filling's degree, points per
+/// constraint curve, iterations, 2D, 3D, angular and curvature tolerances, largest degree and
+/// most segments of its approximation, and 1 to start from the removed face's own surface.
+inline std::unique_ptr<TopoDS_Shape> cadrs_fill_face(const TopoDS_Shape &shape, int32_t index, int32_t order, double tol,
+                                                     rust::Slice<const double> params, std::vector<int32_t> &hist,
+                                                     std::vector<double> &errors) {
+  auto param = [&](size_t i, double d) { return i < params.size() ? params[i] : d; };
+  TopTools_IndexedMapOfShape faces;
+  TopExp::MapShapes(shape, TopAbs_FACE, faces);
+  if (index < 0 || index >= faces.Extent()) {
+    throw std::runtime_error("no such face");
+  }
+  const TopoDS_Face gone = TopoDS::Face(faces(index + 1));
+  TopTools_IndexedDataMapOfShapeListOfShape edge_faces;
+  TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edge_faces);
+  const GeomAbs_Shape cont = order <= 0 ? GeomAbs_C0 : (order == 1 ? GeomAbs_G1 : GeomAbs_G2);
+  BRepOffsetAPI_MakeFilling fill((int)param(0, 3), (int)param(1, 15), (int)param(2, 2), Standard_False, param(3, 1e-5),
+                                 param(4, 1e-4), param(5, 0.01), param(6, 0.1), (int)param(7, 8), (int)param(8, 9));
+  if (param(9, 0) > 0.5) {
+    fill.LoadInitSurface(gone);
+  }
+  int n = 0;
+  for (TopExp_Explorer ex(gone, TopAbs_EDGE); ex.More(); ex.Next()) {
+    const TopoDS_Edge e = TopoDS::Edge(ex.Current());
+    if (BRep_Tool::Degenerated(e)) {
+      continue;
+    }
+    TopoDS_Face support;
+    const int k = edge_faces.FindIndex(e);
+    if (k > 0) {
+      for (TopTools_ListOfShape::Iterator it(edge_faces(k)); it.More(); it.Next()) {
+        if (!it.Value().IsSame(gone)) {
+          support = TopoDS::Face(it.Value());
+          break;
+        }
+      }
+    }
+    if (support.IsNull() || cont == GeomAbs_C0) {
+      fill.Add(e, GeomAbs_C0, Standard_True);
+    } else {
+      fill.Add(e, support, cont, Standard_True);
+    }
+    n++;
+  }
+  if (n < 2) {
+    throw std::runtime_error("the face has too few edges to fill");
+  }
+  fill.Build();
+  if (!fill.IsDone()) {
+    throw std::runtime_error("the filling could not be built");
+  }
+  errors.clear();
+  errors.push_back(fill.G0Error());
+  errors.push_back(fill.G1Error());
+  errors.push_back(fill.G2Error());
+  const TopoDS_Shape patch = fill.Shape();
+  const double sew_tol = std::max(tol, 10.0 * fill.G0Error());
+  BRepBuilderAPI_Sewing sew(sew_tol);
+  for (int i = 1; i <= faces.Extent(); i++) {
+    if (i != index + 1) {
+      sew.Add(faces(i));
+    }
+  }
+  sew.Add(patch);
+  sew.Perform();
+  const TopoDS_Shape sewn = sew.SewedShape();
+  TopExp_Explorer shells(sewn, TopAbs_SHELL);
+  if (!shells.More()) {
+    throw std::runtime_error("the filling does not sew into a shell");
+  }
+  BRepBuilderAPI_MakeSolid make(TopoDS::Shell(shells.Current()));
+  if (!make.IsDone()) {
+    throw std::runtime_error("the filled faces could not be made solid");
+  }
+  TopoDS_Solid result = make.Solid();
+  BRepLib::OrientClosedSolid(result);
+  // Where each face of the result came from.
+  TopTools_IndexedMapOfShape out_faces;
+  TopExp::MapShapes(result, TopAbs_FACE, out_faces);
+  hist.assign(out_faces.Extent(), -2);
+  auto image = [&](const TopoDS_Shape &f) -> int {
+    const TopoDS_Shape m = sew.IsModified(f) ? sew.Modified(f) : f;
+    return out_faces.FindIndex(m);
+  };
+  for (int i = 1; i <= faces.Extent(); i++) {
+    if (i == index + 1) {
+      continue;
+    }
+    const int j = image(faces(i));
+    if (j > 0) {
+      hist[j - 1] = i - 1;
+    }
+  }
+  for (TopExp_Explorer ex(patch, TopAbs_FACE); ex.More(); ex.Next()) {
+    const int j = image(ex.Current());
+    if (j > 0) {
+      hist[j - 1] = -1;
+    }
+  }
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
+}

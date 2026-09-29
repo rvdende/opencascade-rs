@@ -410,5 +410,14 @@ mod inner {
             out: Pin<&mut CxxVector<f64>>,
         ) -> Result<()>;
         pub fn cadrs_sew_solid(shapes: &TopTools_ListOfShape, tol: f64) -> Result<UniquePtr<TopoDS_Shape>>;
+        pub fn cadrs_fill_face(
+            shape: &TopoDS_Shape,
+            index: i32,
+            order: i32,
+            tol: f64,
+            params: &[f64],
+            hist: Pin<&mut CxxVector<i32>>,
+            errors: Pin<&mut CxxVector<f64>>,
+        ) -> Result<UniquePtr<TopoDS_Shape>>;
     }
 }

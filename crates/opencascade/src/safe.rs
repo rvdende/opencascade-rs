@@ -1070,4 +1070,21 @@ impl Shape {
         let list = shape_list(shapes.iter().map(|s| &*s.inner));
         shape(ffi::cadrs_safe::cadrs_sew_solid(&list, tol).map_err(occt)?)
     }
+
+    /// The solid with its face `index` (explorer order) replaced by an N-sided filling
+    /// (`BRepOffsetAPI_MakeFilling`) through the face's boundary edges, meeting each
+    /// neighbouring face with `continuity` (0 C0, 1 G1, 2 G2), sewn back within `tol` (cadrs
+    /// Final: Smooth fillet corners). Returns the solid, the input face each of its faces
+    /// continues (`None` for the filling), and the filling's G0, G1 and G2 errors. `params`
+    /// tune the filling (see `cadrs_fill_face`; empty for OCCT's defaults).
+    pub fn try_fill_face(&self, index: usize, continuity: u8, tol: f64, params: &[f64]) -> Result<(Shape, Vec<Option<usize>>, [f64; 3]), Error> {
+        let mut hist = ffi::cadrs_safe::cadrs_new_i32_vec();
+        let mut errs = ffi::cadrs_safe::cadrs_new_f64_vec();
+        let inner = ffi::cadrs_safe::cadrs_fill_face(&self.inner, index as i32, continuity as i32, tol, params, hist.pin_mut(), errs.pin_mut())
+            .map_err(occt)?;
+        let sources = hist.as_slice().iter().map(|&i| usize::try_from(i).ok()).collect();
+        let e = errs.as_slice();
+        let errors = [e.first().copied().unwrap_or(0.0), e.get(1).copied().unwrap_or(0.0), e.get(2).copied().unwrap_or(0.0)];
+        Ok((shape(inner)?, sources, errors))
+    }
 }
