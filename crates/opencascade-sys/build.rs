@@ -56,6 +56,9 @@ fn main() {
         // TKService (pulled in by XDE) uses these.
         println!("cargo:rustc-link-lib=dylib=gdi32");
         println!("cargo:rustc-link-lib=dylib=advapi32");
+        // Image_AlienPixMap (TKService) uses COM and WIC.
+        println!("cargo:rustc-link-lib=dylib=ole32");
+        println!("cargo:rustc-link-lib=dylib=windowscodecs");
     }
 
     // TODO(bschwind) - Iterate over the src/ directory to populate this.
