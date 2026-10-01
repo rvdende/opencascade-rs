@@ -226,6 +226,8 @@ mod inner {
             hist: Pin<&mut CxxVector<i32>>,
         ) -> Result<UniquePtr<TopoDS_Shape>>;
         pub fn cadrs_unify_h(shape: &TopoDS_Shape, hist: Pin<&mut CxxVector<i32>>) -> Result<UniquePtr<TopoDS_Shape>>;
+        pub fn cadrs_write_bin_brep(shape: &TopoDS_Shape) -> Result<Vec<u8>>;
+        pub fn cadrs_read_bin_brep(bytes: &[u8]) -> Result<UniquePtr<TopoDS_Shape>>;
         pub fn cadrs_fuse_clean_h(
             a: &TopoDS_Shape,
             b: &TopoDS_Shape,

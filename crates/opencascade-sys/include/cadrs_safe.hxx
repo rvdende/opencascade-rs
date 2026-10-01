@@ -2346,3 +2346,38 @@ inline std::unique_ptr<TopoDS_Shape> cadrs_fill_face(const TopoDS_Shape &shape, 
   }
   return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
 }
+
+// ---------------------------------------------------------------------------------------------
+// cadrs: a shape to and from bytes in OCCT's binary BRep format (BinTools), which keeps the
+// topology and the order of its sub-shapes exactly, so names indexed by sub-shape survive the
+// round trip (cadrs caches built bodies, and may share them between peers). Without
+// triangulations: they are remade.
+
+#include <BinTools.hxx>
+#include <sstream>
+
+inline rust::Vec<uint8_t> cadrs_write_bin_brep(const TopoDS_Shape &shape) {
+  std::ostringstream os(std::ios::out | std::ios::binary);
+  BinTools::Write(shape, os, Standard_False, Standard_False, BinTools_FormatVersion_CURRENT);
+  if (!os) {
+    throw std::runtime_error("cannot write the BRep");
+  }
+  const std::string s = os.str();
+  rust::Vec<uint8_t> out;
+  out.reserve(s.size());
+  for (char c : s) {
+    out.push_back(static_cast<uint8_t>(c));
+  }
+  return out;
+}
+
+inline std::unique_ptr<TopoDS_Shape> cadrs_read_bin_brep(rust::Slice<const uint8_t> bytes) {
+  std::istringstream is(std::string(reinterpret_cast<const char *>(bytes.data()), bytes.size()),
+                        std::ios::in | std::ios::binary);
+  TopoDS_Shape shape;
+  BinTools::Read(shape, is);
+  if (shape.IsNull()) {
+    throw std::runtime_error("cannot read the BRep");
+  }
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(shape));
+}

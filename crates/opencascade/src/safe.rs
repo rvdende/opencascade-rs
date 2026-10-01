@@ -230,6 +230,17 @@ impl Face {
 }
 
 impl Shape {
+    /// The shape in OCCT's binary BRep format (no triangulations). Reading it back gives the
+    /// same topology with its sub-shapes in the same order.
+    pub fn try_to_bin_brep(&self) -> Result<Vec<u8>, Error> {
+        ffi::cadrs_safe::cadrs_write_bin_brep(&self.inner).map_err(occt)
+    }
+
+    /// Reads a shape written by [`Shape::try_to_bin_brep`].
+    pub fn try_from_bin_brep(bytes: &[u8]) -> Result<Shape, Error> {
+        shape(ffi::cadrs_safe::cadrs_read_bin_brep(bytes).map_err(occt)?)
+    }
+
     fn try_boolean(&self, other: &Shape, op: i32) -> Result<Shape, Error> {
         shape(ffi::cadrs_safe::cadrs_boolean(&self.inner, &other.inner, op).map_err(occt)?)
     }
