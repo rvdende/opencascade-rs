@@ -291,6 +291,15 @@ mod inner {
         ) -> Result<UniquePtr<TopoDS_Edge>>;
         pub fn cadrs_edge_split(edge: &TopoDS_Edge, px: f64, py: f64, pz: f64) -> Result<UniquePtr<TopoDS_Shape>>;
         pub fn cadrs_edge_reversed(edge: &TopoDS_Edge) -> Result<UniquePtr<TopoDS_Edge>>;
+        pub fn cadrs_face_normal_at(
+            face: &TopoDS_Face,
+            px: f64,
+            py: f64,
+            pz: f64,
+            nx: &mut f64,
+            ny: &mut f64,
+            nz: &mut f64,
+        ) -> Result<()>;
         pub fn cadrs_edge_samples(
             shape: &TopoDS_Shape,
             index: i32,
@@ -412,6 +421,7 @@ mod inner {
             out: Pin<&mut CxxVector<f64>>,
         ) -> Result<()>;
         pub fn cadrs_sew_solid(shapes: &TopTools_ListOfShape, tol: f64) -> Result<UniquePtr<TopoDS_Shape>>;
+        pub fn cadrs_mesh_solid(points: &[f64], triangles: &[i32], tol: f64) -> Result<UniquePtr<TopoDS_Shape>>;
         pub fn cadrs_fill_face(
             shape: &TopoDS_Shape,
             index: i32,

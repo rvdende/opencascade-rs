@@ -11,6 +11,7 @@
 #pragma once
 
 #include <Standard_Failure.hxx>
+#include <cstdlib>
 #include <exception>
 #include <string>
 
@@ -49,6 +50,7 @@ template <typename Try, typename Fail> static void trycatch(Try &&func, Fail &&f
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepLib_ToolTriangulatedShape.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
+#include <IMeshTools_Parameters.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
@@ -83,6 +85,10 @@ template <typename Try, typename Fail> static void trycatch(Try &&func, Fail &&f
 #include <gp_Ax1.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
+#include <map>
+#include <BRepGProp_Face.hxx>
+#include <BRepTools.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <GProp_GProps.hxx>
 #include <BRepLProp_SLProps.hxx>
 #include <Geom2d_Curve.hxx>
@@ -173,8 +179,20 @@ inline std::unique_ptr<TopoDS_Edge> cadrs_edge_ellipse(double cx, double cy, dou
 inline std::unique_ptr<std::vector<double>> cadrs_edge_polyline(const TopoDS_Edge &edge, const TopoDS_Shape &shape,
                                                                double angular, double deflection) {
   std::unique_ptr<std::vector<double>> out(new std::vector<double>());
-  for (TopExp_Explorer faces(shape, TopAbs_FACE); faces.More(); faces.Next()) {
-    const TopoDS_Face &face = TopoDS::Face(faces.Current());
+  // The faces around each edge of the last shape asked about: every edge of a shape is asked
+  // for in turn, and searching all its faces each time took minutes for a 27 000-face STL.
+  static thread_local TopoDS_Shape around_of;
+  static thread_local TopTools_IndexedDataMapOfShapeListOfShape around;
+  if (!around_of.IsEqual(shape)) {
+    around.Clear();
+    TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, around);
+    around_of = shape;
+  }
+  static const TopTools_ListOfShape none;
+  const TopTools_ListOfShape *faces_of_edge = around.Seek(edge);
+  for (TopTools_ListOfShape::Iterator faces(faces_of_edge != nullptr ? *faces_of_edge : none); faces.More();
+       faces.Next()) {
+    const TopoDS_Face &face = TopoDS::Face(faces.Value());
     for (TopExp_Explorer edges(face, TopAbs_EDGE); edges.More(); edges.Next()) {
       if (!edges.Current().IsSame(edge)) {
         continue;
@@ -684,8 +702,32 @@ inline void cadrs_vertices(const TopoDS_Shape &shape, std::vector<double> &point
 // Meshing
 
 /// Triangulates every face of `shape` (linear deflection in model units, angular in radians).
+/// With the Delabella triangulator: OCCT's default (Watson) took 20 s on a perfboard face with
+/// 825 holes, Delabella under 2 s. A face Delabella leaves without a triangulation is meshed
+/// again with Watson (the incremental mesher keeps the faces that have one).
 inline void cadrs_mesh(const TopoDS_Shape &shape, double deflection, double angular) {
-  BRepMesh_IncrementalMesh mesh(shape, deflection, Standard_False, angular, Standard_True);
+  IMeshTools_Parameters params;
+  // CSF_MeshAlgo (OCCT's own switch: watson, delabella) still picks one, for comparisons.
+  params.MeshAlgo = std::getenv("CSF_MeshAlgo") != nullptr ? IMeshTools_MeshAlgoType_DEFAULT
+                                                           : IMeshTools_MeshAlgoType_Delabella;
+  params.Deflection = deflection;
+  params.Angle = angular;
+  params.Relative = Standard_False;
+  params.InParallel = Standard_True;
+  BRepMesh_IncrementalMesh mesh(shape, params);
+  bool missing = false;
+  for (TopExp_Explorer ex(shape, TopAbs_FACE); ex.More() && !missing; ex.Next()) {
+    TopLoc_Location loc;
+    missing = BRep_Tool::Triangulation(TopoDS::Face(ex.Current()), loc).IsNull();
+  }
+  if (missing && params.MeshAlgo == IMeshTools_MeshAlgoType_Delabella) {
+    params.MeshAlgo = IMeshTools_MeshAlgoType_Watson;
+    BRepMesh_IncrementalMesh again(shape, params);
+    if (!again.IsDone()) {
+      throw std::runtime_error("meshing failed");
+    }
+    return;
+  }
   if (!mesh.IsDone()) {
     throw std::runtime_error("meshing failed");
   }
@@ -1312,6 +1354,39 @@ inline std::unique_ptr<TopoDS_Shape> cadrs_edge_split(const TopoDS_Edge &edge, d
     b.Add(out, *cadrs_edge_from(second));
   }
   return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(out));
+}
+
+/// The normal of `face` (outward for its orientation) at the point of it nearest `p`, or at the
+/// middle of its parameter range when `p` doesn't project onto its surface. Face::normal_at asked
+/// for the nearest projection unconditionally, and OCCT's Standard_OutOfRange when there was
+/// none aborted the process (it isn't a std::exception, so cxx couldn't turn it into an error).
+inline void cadrs_face_normal_at(const TopoDS_Face &face, double px, double py, double pz, double &nx,
+                                 double &ny, double &nz) {
+  try {
+    Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+    if (surface.IsNull()) {
+      throw std::runtime_error("the face has no surface");
+    }
+    double u = 0.0, v = 0.0;
+    GeomAPI_ProjectPointOnSurf proj(gp_Pnt(px, py, pz), surface);
+    if (proj.IsDone() && proj.NbPoints() > 0) {
+      proj.LowerDistanceParameters(u, v);
+    } else {
+      double u0 = 0.0, u1 = 0.0, v0 = 0.0, v1 = 0.0;
+      BRepTools::UVBounds(face, u0, u1, v0, v1);
+      u = 0.5 * (u0 + u1);
+      v = 0.5 * (v0 + v1);
+    }
+    BRepGProp_Face props(face);
+    gp_Pnt p;
+    gp_Vec n;
+    props.Normal(u, v, p, n);
+    nx = n.X();
+    ny = n.Y();
+    nz = n.Z();
+  } catch (const Standard_Failure &e) {
+    throw std::runtime_error(e.GetMessageString());
+  }
 }
 
 /// The same edge run the other way.
@@ -2230,6 +2305,64 @@ inline std::unique_ptr<TopoDS_Shape> cadrs_sew_solid(const TopTools_ListOfShape 
   TopoDS_Solid result = make.Solid();
   BRepLib::OrientClosedSolid(result);
   return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
+}
+
+/// A solid from a closed, consistently wound triangle mesh: `points` (xyz triples) and
+/// `triangles` (three point indices each), with one vertex per point and one edge per pair of
+/// points the triangles share, as sewing the triangles would make it but without its search
+/// (sewing a 27 000-triangle STL took minutes in BRepTools_Quilt).
+inline std::unique_ptr<TopoDS_Shape> cadrs_mesh_solid(rust::Slice<const double> points,
+                                                      rust::Slice<const int32_t> triangles, double tol) {
+  try {
+    const size_t np = points.size() / 3;
+    BRep_Builder b;
+    std::vector<TopoDS_Vertex> verts(np);
+    std::vector<gp_Pnt> pts(np);
+    for (size_t i = 0; i < np; ++i) {
+      pts[i] = gp_Pnt(points[3 * i], points[3 * i + 1], points[3 * i + 2]);
+      b.MakeVertex(verts[i], pts[i], tol);
+    }
+    std::map<std::pair<int32_t, int32_t>, TopoDS_Edge> edges;
+    auto edge = [&](int32_t from, int32_t to) -> TopoDS_Edge {
+      const std::pair<int32_t, int32_t> key(std::min(from, to), std::max(from, to));
+      auto it = edges.find(key);
+      if (it == edges.end()) {
+        BRepBuilderAPI_MakeEdge make(verts[key.first], verts[key.second]);
+        if (!make.IsDone()) {
+          throw std::runtime_error("a mesh edge could not be made");
+        }
+        it = edges.emplace(key, make.Edge()).first;
+      }
+      return from == key.first ? it->second : TopoDS::Edge(it->second.Reversed());
+    };
+    TopoDS_Shell shell;
+    b.MakeShell(shell);
+    for (size_t t = 0; t + 2 < triangles.size(); t += 3) {
+      const int32_t a = triangles[t], c = triangles[t + 1], d = triangles[t + 2];
+      const gp_Vec n = gp_Vec(pts[a], pts[c]).Crossed(gp_Vec(pts[a], pts[d]));
+      if (n.Magnitude() <= 1e-300) {
+        continue;
+      }
+      TopoDS_Wire wire;
+      b.MakeWire(wire);
+      b.Add(wire, edge(a, c));
+      b.Add(wire, edge(c, d));
+      b.Add(wire, edge(d, a));
+      BRepBuilderAPI_MakeFace face(gp_Pln(pts[a], gp_Dir(n)), wire, Standard_True);
+      if (!face.IsDone()) {
+        throw std::runtime_error("a mesh face could not be made");
+      }
+      b.Add(shell, face.Face());
+    }
+    shell.Closed(Standard_True);
+    TopoDS_Solid solid;
+    b.MakeSolid(solid);
+    b.Add(solid, shell);
+    BRepLib::OrientClosedSolid(solid);
+    return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(solid));
+  } catch (const Standard_Failure &e) {
+    throw std::runtime_error(e.GetMessageString());
+  }
 }
 
 // ------------------------------------------------------------------------------------------

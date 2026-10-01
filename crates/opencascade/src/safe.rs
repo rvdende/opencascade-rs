@@ -1082,6 +1082,13 @@ impl Shape {
         shape(ffi::cadrs_safe::cadrs_sew_solid(&list, tol).map_err(occt)?)
     }
 
+    /// A solid from a closed, consistently wound triangle mesh (`points` as xyz triples,
+    /// `triangles` as three point indices each), its triangles sharing their vertices and edges
+    /// (cadrs: what sewing them makes, without sewing's search).
+    pub fn try_mesh_solid(points: &[f64], triangles: &[i32], tol: f64) -> Result<Shape, Error> {
+        shape(ffi::cadrs_safe::cadrs_mesh_solid(points, triangles, tol).map_err(occt)?)
+    }
+
     /// The solid with its face `index` (explorer order) replaced by an N-sided filling
     /// (`BRepOffsetAPI_MakeFilling`) through the face's boundary edges, meeting each
     /// neighbouring face with `continuity` (0 C0, 1 G1, 2 G2), sewn back within `tol` (cadrs

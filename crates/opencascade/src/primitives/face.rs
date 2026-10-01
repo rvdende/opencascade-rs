@@ -3,7 +3,7 @@ use crate::{
     law_function::law_function_from_graph,
     make_pipe_shell::make_pipe_shell_with_law_function,
     primitives::{
-        make_axis_1, make_point, make_vec, EdgeIterator, JoinType, Shape, Solid, Surface, Wire,
+        make_axis_1, make_vec, EdgeIterator, JoinType, Shape, Solid, Surface, Wire,
     },
     workplane::Workplane,
 };
@@ -293,21 +293,13 @@ impl Face {
         dvec3(center.X(), center.Y(), center.Z())
     }
 
+    /// The normal at the point of the face nearest `pos` (zero when OCCT can't give one).
     pub fn normal_at(&self, pos: DVec3) -> DVec3 {
-        let surface = ffi::b_rep::BRep_Tool_Surface(&self.inner);
-        let projector = ffi::geom_api::GeomAPI_ProjectPointOnSurf_new(&make_point(pos), &surface);
-        let mut u: f64 = 0.0;
-        let mut v: f64 = 0.0;
-
-        projector.LowerDistanceParameters(&mut u, &mut v);
-
-        let mut p = ffi::gp::new_point(0.0, 0.0, 0.0);
-        let mut normal = ffi::gp::new_vec(0.0, 1.0, 0.0);
-
-        let face = ffi::b_rep_g_prop::BRepGProp_Face_new(&self.inner);
-        face.Normal(u, v, p.pin_mut(), normal.pin_mut());
-
-        dvec3(normal.X(), normal.Y(), normal.Z())
+        let (mut x, mut y, mut z) = (0.0, 0.0, 0.0);
+        match ffi::cadrs_safe::cadrs_face_normal_at(&self.inner, pos.x, pos.y, pos.z, &mut x, &mut y, &mut z) {
+            Ok(()) => dvec3(x, y, z),
+            Err(_) => DVec3::ZERO,
+        }
     }
 
     pub fn normal_at_center(&self) -> DVec3 {
