@@ -569,6 +569,9 @@ static void RelocatePCurvesToNewUorigin(const TopTools_SequenceOfShape& theEdges
       if (Elist.IsEmpty())
         break; //end of contour in 3d
       
+      // cadrs patch: when no edge at CurVertex continues the contour (each is skipped below),
+      // CurEdge stayed the same and this loop spun forever. End the contour there instead.
+      Standard_Boolean isNextFound = Standard_False;
       TopTools_ListIteratorOfListOfShape itl(Elist);
       for (; itl.More(); itl.Next())
       {
@@ -609,8 +612,11 @@ static void RelocatePCurvesToNewUorigin(const TopTools_SequenceOfShape& theEdges
         CurParam = (CurOr == TopAbs_FORWARD)?
           aPCurve->LastParameter() : aPCurve->FirstParameter();
         CurPoint = aPCurve->Value(CurParam);
+        isNextFound = Standard_True;
         break;
       }
+      if (!isNextFound)
+        break;
     } //for (;;) (collect pcurves of a contour)
   } //for (;;) (walk by contours)
 }
