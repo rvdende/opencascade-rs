@@ -2238,7 +2238,15 @@ inline std::unique_ptr<TopoDS_Shape> cadrs_offset_h(const TopoDS_Shape &shape, r
   if (!make.IsDone()) {
     throw std::runtime_error("the offset could not be built");
   }
-  const TopoDS_Shape result = make.Shape();
+  TopoDS_Shape result = make.Shape();
+  // Some faces moved and the rest kept (Move face) comes back as a closed shell: the solid it
+  // bounds (the same faces, so the history still holds).
+  if (result.ShapeType() == TopAbs_SHELL && BRep_Tool::IsClosed(result)) {
+    BRepBuilderAPI_MakeSolid solid(TopoDS::Shell(result));
+    if (solid.IsDone()) {
+      result = solid.Solid();
+    }
+  }
   cadrs_history(make, {&shape}, result, nullptr, nullptr, hist);
   return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
 }
@@ -2513,4 +2521,34 @@ inline std::unique_ptr<TopoDS_Shape> cadrs_read_bin_brep(rust::Slice<const uint8
     throw std::runtime_error("cannot read the BRep");
   }
   return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(shape));
+}
+
+// ---------------------------------------------------------------------------------------------
+// cadrs: Delete face (Onshape's direct edit): faces removed and the gap healed by extending
+// their neighbours (OCCT's defeaturing: a fillet, a chamfer, a hole, a boss, a groove). (Move
+// face is the per-face offset, cadrs_offset_h.)
+
+#include <BRepAlgoAPI_Defeaturing.hxx>
+
+/// `shape` without `faces`, the gap healed by its neighbours, with history. Fails if the
+/// faces can't be removed (defeaturing leaves them in place with a warning).
+inline std::unique_ptr<TopoDS_Shape> cadrs_defeature_h(const TopoDS_Shape &shape, const TopTools_ListOfShape &faces,
+                                                      std::vector<int32_t> &hist) {
+  BRepAlgoAPI_Defeaturing make;
+  make.SetShape(shape);
+  make.AddFacesToRemove(faces);
+  make.SetRunParallel(Standard_False);
+  make.SetToFillHistory(Standard_True);
+  make.Build();
+  if (!make.IsDone() || make.HasErrors()) {
+    throw std::runtime_error("the faces can't be removed");
+  }
+  for (TopTools_ListOfShape::Iterator it(faces); it.More(); it.Next()) {
+    if (!make.IsDeleted(it.Value()) && make.Modified(it.Value()).IsEmpty()) {
+      throw std::runtime_error("the faces can't be removed: their neighbours don't close the gap");
+    }
+  }
+  const TopoDS_Shape result = make.Shape();
+  cadrs_history(make, {&shape}, result, nullptr, nullptr, hist);
+  return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(result));
 }

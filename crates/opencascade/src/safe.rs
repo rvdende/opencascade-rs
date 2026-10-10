@@ -511,6 +511,13 @@ impl Shape {
         with_history(|h| ffi::cadrs_safe::cadrs_thick_solid_h(&self.inner, &list, offset, 1e-4, h))
     }
 
+    /// Delete face: `faces` removed and the gap healed by extending their neighbours (a fillet,
+    /// a chamfer, a hole, a boss or a groove taken away), with history.
+    pub fn try_delete_faces_h<'a>(&self, faces: impl IntoIterator<Item = &'a Face>) -> Result<(Shape, History), Error> {
+        let list = shape_list(faces.into_iter().map(|f| ffi::topo_ds::cast_face_to_shape(&f.inner)));
+        with_history(|h| ffi::cadrs_safe::cadrs_defeature_h(&self.inner, &list, h))
+    }
+
     /// The number of distinct faces, edges and vertices.
     pub fn topology_counts(&self) -> Result<[usize; 3], Error> {
         topo_counts(&self.inner)
