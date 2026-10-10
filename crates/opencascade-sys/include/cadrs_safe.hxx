@@ -101,6 +101,8 @@ template <typename Try, typename Fail> static void trycatch(Try &&func, Fail &&f
 #include <BRepBndLib.hxx>
 #include <BRepIntCurveSurface_Inter.hxx>
 #include <BRep_Builder.hxx>
+#include <ElCLib.hxx>
+#include <Geom_Circle.hxx>
 #include <Bnd_Box.hxx>
 #include <TopoDS_Compound.hxx>
 #include <gp_Lin.hxx>
@@ -156,6 +158,62 @@ inline std::unique_ptr<TopoDS_Edge> cadrs_edge_circle(double cx, double cy, doub
   gp_Circ circ(gp_Ax2(gp_Pnt(cx, cy, cz), gp_Dir(nx, ny, nz), gp_Dir(xx, xy, xz)), radius);
   BRepBuilderAPI_MakeEdge make(circ);
   return cadrs_edge_from(make);
+}
+
+/// A circle about `axis`: the whole circle if `full`, else the arc from the point `p1` to `p2`
+/// (between their projections onto the circle; they become the edge's vertices), counter-clockwise seen from
+/// `axis`, or clockwise with `reversed` (the edge then runs against the circle's parameter).
+/// Its x direction (where its parameter starts) depends on its axis line alone, not on the
+/// sketch it was drawn in, so circles about one axis have the same one: UnifySameDomain keeps
+/// faces swept from circles apart when their x directions differ (an arc made through three
+/// points starts at its first point; two sketches have their own x directions).
+inline std::unique_ptr<TopoDS_Edge> cadrs_edge_circle_arc(double cx, double cy, double cz, double nx, double ny,
+                                                         double nz, double radius, bool full, bool reversed, double ax,
+                                                         double ay, double az, double bx, double by, double bz) {
+  const gp_Dir n(nx, ny, nz);
+  // The axis line's direction, turned to point along its largest component's positive side.
+  const double c[3] = {n.X(), n.Y(), n.Z()};
+  int big = 0;
+  for (int i = 1; i < 3; ++i) {
+    if (std::abs(c[i]) > std::abs(c[big]) + 1e-12) {
+      big = i;
+    }
+  }
+  const gp_Vec line = c[big] < 0.0 ? gp_Vec(n.Reversed()) : gp_Vec(n);
+  // Across it: world Z × line, or world X × line when the line is near Z.
+  const gp_Vec ref = std::abs(line.Z()) < 0.9 ? gp_Vec(0, 0, 1) : gp_Vec(1, 0, 0);
+  const gp_Dir x(ref.Crossed(line));
+  gp_Circ circ(gp_Ax2(gp_Pnt(cx, cy, cz), n, x), radius);
+  std::unique_ptr<TopoDS_Edge> edge;
+  if (full) {
+    BRepBuilderAPI_MakeEdge make(circ);
+    edge = cadrs_edge_from(make);
+  } else {
+    // The ends are the loop's joints, which can lie a little off the circle (a sheet metal
+    // wall's bend): the arc runs between their projections, and they stay its vertices, their
+    // tolerance covering the gap, so the arc still meets its neighbours.
+    const gp_Pnt from = reversed ? gp_Pnt(bx, by, bz) : gp_Pnt(ax, ay, az);
+    const gp_Pnt to = reversed ? gp_Pnt(ax, ay, az) : gp_Pnt(bx, by, bz);
+    BRep_Builder builder;
+    auto vertex = [&](const gp_Pnt &p, double u) {
+      const double gap = ElCLib::Value(u, circ).Distance(p);
+      TopoDS_Vertex v;
+      builder.MakeVertex(v, p, std::max(Precision::Confusion(), 1.01 * gap));
+      return v;
+    };
+    const double u1 = ElCLib::Parameter(circ, from);
+    double u2 = ElCLib::Parameter(circ, to);
+    if (u2 <= u1 + Precision::PConfusion()) {
+      u2 += 2.0 * M_PI;
+    }
+    Handle(Geom_Circle) curve = new Geom_Circle(circ);
+    BRepBuilderAPI_MakeEdge make(curve, vertex(from, u1), vertex(to, u2), u1, u2);
+    edge = cadrs_edge_from(make);
+  }
+  if (reversed) {
+    *edge = TopoDS::Edge(edge->Reversed());
+  }
+  return edge;
 }
 
 /// An ellipse about `normal` with its major axis along `x_dir` (`major` >= `minor`): the whole

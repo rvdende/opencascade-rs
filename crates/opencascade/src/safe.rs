@@ -80,6 +80,21 @@ impl Edge {
         Ok(Self { inner })
     }
 
+    /// A circle about `axis`: the whole circle, or with `ends` the arc from the first point to
+    /// the second (they become its vertices), counter-clockwise seen from `axis`, or clockwise
+    /// if `reversed`. Its x direction depends only on its axis line, so circles about one axis
+    /// (from any sketch) have the same one.
+    pub fn try_circle_arc(center: DVec3, axis: DVec3, radius: f64, ends: Option<(DVec3, DVec3)>, reversed: bool) -> Result<Self, Error> {
+        let (c, n) = (center, axis);
+        let (full, (a, b)) = match ends {
+            Some(e) => (false, e),
+            None => (true, (DVec3::ZERO, DVec3::ZERO)),
+        };
+        let inner = ffi::cadrs_safe::cadrs_edge_circle_arc(c.x, c.y, c.z, n.x, n.y, n.z, radius, full, reversed, a.x, a.y, a.z, b.x, b.y, b.z)
+            .map_err(occt)?;
+        Ok(Self { inner })
+    }
+
     /// A full circle, counter-clockwise seen from `normal`, starting at `center + radius·x_dir`.
     pub fn try_circle(center: DVec3, normal: DVec3, x_dir: DVec3, radius: f64) -> Result<Self, Error> {
         let (c, n, x) = (center, normal, x_dir);

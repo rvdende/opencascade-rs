@@ -52,6 +52,23 @@ mod inner {
             radius: f64,
         ) -> Result<UniquePtr<TopoDS_Edge>>;
         #[allow(clippy::too_many_arguments)]
+        pub fn cadrs_edge_circle_arc(
+            cx: f64,
+            cy: f64,
+            cz: f64,
+            nx: f64,
+            ny: f64,
+            nz: f64,
+            radius: f64,
+            full: bool,
+            reversed: bool,
+            ax: f64,
+            ay: f64,
+            az: f64,
+            bx: f64,
+            by: f64,
+            bz: f64,
+        ) -> Result<UniquePtr<TopoDS_Edge>>;
         pub fn cadrs_edge_ellipse(
             cx: f64,
             cy: f64,
